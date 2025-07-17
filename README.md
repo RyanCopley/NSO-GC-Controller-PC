@@ -12,6 +12,7 @@ You can also press the Emulate button after connecting to make it emulate a 360 
 
 - Install .NET SDK in Visual Studio
 - Build it :D
+Or run "dotnet build WinFormsApp1/WinFormsApp1.csproj -c Release" in the repository.
 
 **How to use**
 
