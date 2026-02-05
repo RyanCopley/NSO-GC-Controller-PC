@@ -5,6 +5,7 @@ Manages the HID read thread and processes raw controller data, feeding
 calibration tracking, emulation updates, and UI update scheduling.
 """
 
+import queue
 import time
 import threading
 from typing import Callable, Optional
@@ -20,7 +21,8 @@ class InputProcessor:
     def __init__(self, device_getter: Callable, calibration: dict,
                  cal_mgr: CalibrationManager, emu_mgr: EmulationManager,
                  on_ui_update: Callable, on_error: Callable[[str], None],
-                 on_disconnect: Optional[Callable] = None):
+                 on_disconnect: Optional[Callable] = None,
+                 ble_queue: Optional[queue.Queue] = None):
         self._device_getter = device_getter
         self._calibration = calibration
         self._cal_mgr = cal_mgr
@@ -28,6 +30,7 @@ class InputProcessor:
         self._on_ui_update = on_ui_update
         self._on_error = on_error
         self._on_disconnect = on_disconnect
+        self._ble_queue = ble_queue
 
         self.is_reading = False
         self._stop_event = threading.Event()
@@ -39,13 +42,18 @@ class InputProcessor:
         """Expose the stop event for reconnect logic to check."""
         return self._stop_event
 
-    def start(self):
-        """Start the HID reading thread."""
+    def start(self, mode: str = 'usb'):
+        """Start the reading thread.
+
+        Args:
+            mode: 'usb' for HID device polling, 'ble' for queue-based reading.
+        """
         if self.is_reading:
             return
         self.is_reading = True
         self._stop_event.clear()
-        self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
+        target = self._read_loop_ble if mode == 'ble' else self._read_loop
+        self._read_thread = threading.Thread(target=target, daemon=True)
         self._read_thread.start()
 
     def stop(self):
@@ -90,6 +98,29 @@ class InputProcessor:
         finally:
             self.is_reading = False
             # If we weren't asked to stop, this was an unexpected disconnect
+            if not self._stop_event.is_set() and self._on_disconnect:
+                self._on_disconnect()
+
+    def _read_loop_ble(self):
+        """BLE reading loop — drains the queue, keeps only the latest packet."""
+        try:
+            while self.is_reading and not self._stop_event.is_set():
+                # Drain queue, keep latest
+                latest = None
+                try:
+                    while True:
+                        latest = self._ble_queue.get_nowait()
+                except queue.Empty:
+                    pass
+
+                if latest:
+                    self._process_data(latest)
+                else:
+                    time.sleep(0.004)
+        except Exception as e:
+            self._on_error(f"BLE read loop error: {e}")
+        finally:
+            self.is_reading = False
             if not self._stop_event.is_set() and self._on_disconnect:
                 self._on_disconnect()
 

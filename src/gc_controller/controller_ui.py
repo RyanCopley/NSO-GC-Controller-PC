@@ -54,6 +54,10 @@ class SlotUI:
         self.device_combo: ttk.Combobox = None
         self.device_paths: list = []  # parallel list: index 0 = None (Auto), rest = bytes paths
 
+        # BLE
+        self.pair_btn: Optional[ttk.Button] = None
+        self.ble_status_label: Optional[ttk.Label] = None
+
         # Modes
         self.trigger_mode_var: tk.BooleanVar = None
         self.emu_mode_var: tk.StringVar = None
@@ -70,10 +74,13 @@ class ControllerUI:
                  on_stick_cal: Callable[[int], None],
                  on_trigger_cal: Callable[[int], None],
                  on_save: Callable,
-                 on_refresh: Callable):
+                 on_refresh: Callable,
+                 on_pair: Optional[Callable[[int], None]] = None,
+                 ble_available: bool = False):
         self._root = root
         self._slot_calibrations = slot_calibrations
         self._slot_cal_mgrs = slot_cal_mgrs
+        self._ble_available = ble_available
 
         self._trigger_bar_width = 150
         self._trigger_bar_height = 20
@@ -89,14 +96,14 @@ class ControllerUI:
 
         self.slots: List[SlotUI] = []
         self._setup(on_connect, on_emulate, on_stick_cal, on_trigger_cal, on_save,
-                    on_refresh)
+                    on_refresh, on_pair)
 
         self._initializing = False
 
     # ── Setup ────────────────────────────────────────────────────────
 
     def _setup(self, on_connect, on_emulate, on_stick_cal, on_trigger_cal, on_save,
-               on_refresh):
+               on_refresh, on_pair=None):
         """Create the user interface with notebook tabs."""
         outer_frame = ttk.Frame(self._root, padding="10")
         outer_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -108,7 +115,7 @@ class ControllerUI:
         for i in range(MAX_SLOTS):
             slot_ui = SlotUI()
             self._build_tab(i, slot_ui, on_connect, on_emulate,
-                            on_stick_cal, on_trigger_cal, on_refresh)
+                            on_stick_cal, on_trigger_cal, on_refresh, on_pair)
             self.slots.append(slot_ui)
 
         # Global controls below the notebook (centered)
@@ -128,7 +135,7 @@ class ControllerUI:
 
     def _build_tab(self, index: int, slot_ui: SlotUI,
                    on_connect, on_emulate, on_stick_cal, on_trigger_cal,
-                   on_refresh):
+                   on_refresh, on_pair=None):
         """Build one controller tab."""
         tab = ttk.Frame(self.notebook, padding="10")
         self.notebook.add(tab, text=f"Controller {index + 1}")
@@ -182,6 +189,20 @@ class ControllerUI:
         # Row 2: progress bar
         slot_ui.progress = ttk.Progressbar(connection_frame, length=200, mode='determinate')
         slot_ui.progress.grid(row=2, column=0, columnspan=3, pady=(10, 0), sticky=(tk.W, tk.E))
+
+        # Bluetooth section (only shown if BLE is available)
+        if self._ble_available and on_pair:
+            ble_frame = ttk.LabelFrame(tab, text="Bluetooth", padding="5")
+            ble_frame.grid(row=0, column=2, rowspan=1, sticky=(tk.N, tk.W, tk.E),
+                           padx=(10, 0), pady=(0, 10))
+
+            slot_ui.pair_btn = ttk.Button(
+                ble_frame, text="Pair Controller",
+                command=lambda i=index: on_pair(i))
+            slot_ui.pair_btn.grid(row=0, column=0, padx=5, pady=2, sticky=tk.W)
+
+            slot_ui.ble_status_label = ttk.Label(ble_frame, text="")
+            slot_ui.ble_status_label.grid(row=1, column=0, padx=5, pady=(0, 2), sticky=tk.W)
 
         # Left column
         left_column = ttk.Frame(tab)
@@ -608,3 +629,9 @@ class ControllerUI:
     def update_status(self, slot_index: int, message: str):
         """Update the status label text for a specific slot."""
         self.slots[slot_index].status_label.config(text=message)
+
+    def update_ble_status(self, slot_index: int, message: str):
+        """Update the BLE status label for a specific slot."""
+        s = self.slots[slot_index]
+        if s.ble_status_label:
+            s.ble_status_label.config(text=message)

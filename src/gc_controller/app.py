@@ -39,6 +39,18 @@ from .emulation_manager import EmulationManager
 from .input_processor import InputProcessor
 from .controller_slot import ControllerSlot
 
+# BLE support (optional — only available on Linux with bumble)
+try:
+    from .ble import is_ble_available, find_hci_adapter, stop_bluez
+    from .ble.ble_event_loop import BleEventLoop
+    from .ble.bumble_backend import BumbleBackend
+    _BLE_IMPORTS_OK = True
+except ImportError:
+    _BLE_IMPORTS_OK = False
+
+    def is_ble_available():
+        return False
+
 # Create Dolphin pipe FIFOs early so they show up in Dolphin's device list
 if sys.platform in ('darwin', 'linux'):
     for _pipe_idx in range(MAX_SLOTS):
@@ -86,6 +98,12 @@ class GCControllerEnabler:
             )
             self.slots.append(slot)
 
+        # BLE state (lazy-initialized on first pair)
+        self._ble_available = is_ble_available()
+        self._ble_event_loop = None
+        self._bumble_backend = None
+        self._ble_initialized = False
+
         # UI — pass list of cal_mgrs for live octagon drawing
         self.ui = ControllerUI(
             self.root,
@@ -97,6 +115,8 @@ class GCControllerEnabler:
             on_trigger_cal=self.trigger_cal_step,
             on_save=self.save_settings,
             on_refresh=self.refresh_devices,
+            on_pair=self.pair_controller if self._ble_available else None,
+            ble_available=self._ble_available,
         )
 
         # Now that UI is built, draw initial trigger markers for all slots
@@ -192,6 +212,11 @@ class GCControllerEnabler:
         slot = self.slots[slot_index]
         sui = self.ui.slots[slot_index]
 
+        # If BLE-connected, use BLE disconnect path
+        if slot.ble_connected:
+            self._disconnect_ble(slot_index)
+            return
+
         slot.input_proc.stop()
         slot.emu_mgr.stop()
         slot.conn_mgr.disconnect()
@@ -205,6 +230,288 @@ class GCControllerEnabler:
         self.ui.reset_slot_ui(slot_index)
         self.ui.update_tab_status(slot_index, connected=False, emulating=False)
         self.refresh_devices()
+
+    # ── BLE ───────────────────────────────────────────────────────────
+
+    def _init_ble(self) -> bool:
+        """Lazy-initialize BLE subsystem on first pair attempt.
+
+        Finds HCI adapter, starts event loop, opens Bumble backend.
+        Returns True on success.
+        """
+        if self._ble_initialized:
+            return True
+
+        stop_bluez()
+
+        hci_index = find_hci_adapter()
+        if hci_index is None:
+            self._messagebox.showerror(
+                "BLE Error",
+                "No HCI Bluetooth adapter found.\n\n"
+                "Make sure a Bluetooth adapter is plugged in.")
+            return False
+
+        try:
+            self._ble_event_loop = BleEventLoop()
+            self._ble_event_loop.start()
+
+            self._bumble_backend = BumbleBackend()
+            future = self._ble_event_loop.submit(
+                self._bumble_backend.open(hci_index))
+            future.result(timeout=10.0)
+
+            self._ble_initialized = True
+            return True
+        except Exception as e:
+            err_msg = str(e)
+            if 'Permission' in err_msg or 'errno 1' in err_msg:
+                self._messagebox.showerror(
+                    "BLE Error",
+                    "Permission denied opening HCI socket.\n\n"
+                    "BLE requires running as root:\n"
+                    "  sudo python -m gc_controller\n\n"
+                    "Or stop BlueZ first:\n"
+                    "  sudo systemctl stop bluetooth.service\n"
+                    "  sudo hciconfig hci0 down")
+            else:
+                self._messagebox.showerror(
+                    "BLE Error",
+                    f"Failed to initialize BLE:\n{e}\n\n"
+                    "Make sure BlueZ is stopped:\n"
+                    "  sudo systemctl stop bluetooth.service\n"
+                    "  sudo hciconfig hci0 down")
+            if self._ble_event_loop:
+                self._ble_event_loop.stop()
+                self._ble_event_loop = None
+            self._bumble_backend = None
+            return False
+
+    def pair_controller(self, slot_index: int):
+        """Start BLE pairing for a controller slot."""
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        # If already BLE-connected, disconnect
+        if slot.ble_connected:
+            self._disconnect_ble(slot_index)
+            return
+
+        # If USB-connected, disconnect USB first
+        if slot.is_connected and slot.connection_mode == 'usb':
+            self.disconnect_controller(slot_index)
+
+        # Init BLE subsystem
+        if not self._init_ble():
+            return
+
+        # Disable pair button during pairing
+        if sui.pair_btn:
+            sui.pair_btn.config(state='disabled')
+        self.ui.update_ble_status(slot_index, "Initializing...")
+
+        # Drain any stale data from the queue
+        while not slot.ble_data_queue.empty():
+            try:
+                slot.ble_data_queue.get_nowait()
+            except Exception:
+                break
+
+        # Use saved address for direct connect, or None for scan
+        target_addr = slot.ble_address if slot.ble_address else None
+
+        def _on_status(msg):
+            self.root.after(0, lambda: self.ui.update_ble_status(slot_index, msg))
+
+        def _on_disconnect():
+            self.root.after(0, lambda: self._on_ble_disconnect(slot_index))
+
+        future = self._ble_event_loop.submit(
+            self._bumble_backend.scan_and_connect(
+                slot_index=slot_index,
+                data_queue=slot.ble_data_queue,
+                on_status=_on_status,
+                on_disconnect=_on_disconnect,
+                target_address=target_addr,
+            )
+        )
+
+        def _check_result(f=future):
+            try:
+                if not f.done():
+                    self.root.after(200, lambda: _check_result(f))
+                    return
+                mac = f.result(timeout=0)
+                self._on_pair_complete(slot_index, mac)
+            except Exception as e:
+                self._on_pair_complete(slot_index, None, error=str(e))
+
+        self.root.after(200, lambda: _check_result(future))
+
+    def _on_pair_complete(self, slot_index: int, mac: str | None,
+                          error: str | None = None):
+        """Handle completion of BLE pairing attempt."""
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        if mac:
+            slot.ble_connected = True
+            slot.ble_address = mac
+            slot.connection_mode = 'ble'
+
+            # Save address
+            old_addr = self.slot_calibrations[slot_index].get('preferred_ble_address', '')
+            self.slot_calibrations[slot_index]['preferred_ble_address'] = mac
+            self.slot_calibrations[slot_index]['connection_mode'] = 'ble'
+            if mac != old_addr:
+                self.ui.mark_slot_dirty(slot_index)
+
+            # Start input processor in BLE mode
+            slot.input_proc.start(mode='ble')
+
+            sui.emulate_btn.config(state='normal')
+            if sui.pair_btn:
+                sui.pair_btn.config(text="Disconnect BLE", state='normal')
+            self.ui.update_ble_status(slot_index, f"Connected: {mac}")
+            self.ui.update_status(slot_index, "Connected via BLE")
+            self.ui.update_tab_status(slot_index, connected=True, emulating=False)
+        else:
+            if sui.pair_btn:
+                sui.pair_btn.config(state='normal')
+            if error:
+                self.ui.update_ble_status(slot_index, f"Error: {error}")
+            # Status was already set by on_status callback
+
+    def _disconnect_ble(self, slot_index: int):
+        """Disconnect BLE on a specific slot."""
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        slot.input_proc.stop()
+        slot.emu_mgr.stop()
+
+        if slot.ble_address and self._bumble_backend:
+            try:
+                future = self._ble_event_loop.submit(
+                    self._bumble_backend.disconnect(slot.ble_address))
+                future.result(timeout=5.0)
+            except Exception:
+                pass
+
+        # Drain queue
+        while not slot.ble_data_queue.empty():
+            try:
+                slot.ble_data_queue.get_nowait()
+            except Exception:
+                break
+
+        slot.ble_connected = False
+
+        if sui.pair_btn:
+            sui.pair_btn.config(text="Pair Controller", state='normal')
+        sui.emulate_btn.config(state='disabled', text="Start Emulation")
+        sui.progress['value'] = 0
+        self.ui.update_ble_status(slot_index, "")
+        self.ui.update_status(slot_index, "Disconnected")
+        self.ui.reset_slot_ui(slot_index)
+        self.ui.update_tab_status(slot_index, connected=False, emulating=False)
+
+    def _on_ble_disconnect(self, slot_index: int):
+        """Handle unexpected BLE disconnect."""
+        slot = self.slots[slot_index]
+        if not slot.ble_connected:
+            return
+
+        slot.reconnect_was_emulating = slot.emu_mgr.is_emulating
+        slot.input_proc.stop()
+        if slot.emu_mgr.is_emulating:
+            slot.emu_mgr.stop()
+
+        slot.ble_connected = False
+        sui = self.ui.slots[slot_index]
+
+        self.ui.update_status(slot_index, "BLE disconnected — reconnecting...")
+        self.ui.update_ble_status(slot_index, "Reconnecting...")
+        if sui.pair_btn:
+            sui.pair_btn.config(state='disabled')
+        sui.emulate_btn.config(state='disabled')
+        self.ui.update_tab_status(slot_index, connected=False, emulating=False)
+
+        self._attempt_ble_reconnect(slot_index)
+
+    def _attempt_ble_reconnect(self, slot_index: int):
+        """Try to reconnect BLE. Retries every 3 seconds."""
+        slot = self.slots[slot_index]
+
+        # User clicked disconnect while we were waiting — abort
+        if slot.input_proc.stop_event.is_set():
+            self.ui.update_status(slot_index, "Disconnected")
+            self.ui.update_ble_status(slot_index, "")
+            self.ui.reset_slot_ui(slot_index)
+            if self.ui.slots[slot_index].pair_btn:
+                self.ui.slots[slot_index].pair_btn.config(
+                    text="Pair Controller", state='normal')
+            self.ui.update_tab_status(slot_index, connected=False, emulating=False)
+            return
+
+        if not self._ble_initialized or not self._bumble_backend:
+            self.root.after(3000, lambda: self._attempt_ble_reconnect(slot_index))
+            return
+
+        # Drain stale data
+        while not slot.ble_data_queue.empty():
+            try:
+                slot.ble_data_queue.get_nowait()
+            except Exception:
+                break
+
+        target_addr = slot.ble_address
+
+        def _on_status(msg):
+            self.root.after(0, lambda: self.ui.update_ble_status(slot_index, msg))
+
+        def _on_disconnect():
+            self.root.after(0, lambda: self._on_ble_disconnect(slot_index))
+
+        future = self._ble_event_loop.submit(
+            self._bumble_backend.scan_and_connect(
+                slot_index=slot_index,
+                data_queue=slot.ble_data_queue,
+                on_status=_on_status,
+                on_disconnect=_on_disconnect,
+                target_address=target_addr,
+            )
+        )
+
+        def _check_reconnect(f=future):
+            try:
+                if not f.done():
+                    self.root.after(200, lambda: _check_reconnect(f))
+                    return
+                mac = f.result(timeout=0)
+                if mac:
+                    slot.ble_connected = True
+                    slot.ble_address = mac
+                    slot.input_proc.start(mode='ble')
+
+                    sui = self.ui.slots[slot_index]
+                    sui.emulate_btn.config(state='normal')
+                    if sui.pair_btn:
+                        sui.pair_btn.config(text="Disconnect BLE", state='normal')
+                    self.ui.update_status(slot_index, "Reconnected via BLE")
+                    self.ui.update_ble_status(slot_index, f"Connected: {mac}")
+                    self.ui.update_tab_status(slot_index, connected=True, emulating=False)
+
+                    if slot.reconnect_was_emulating:
+                        slot.reconnect_was_emulating = False
+                        self.toggle_emulation(slot_index)
+                else:
+                    self.root.after(3000,
+                                    lambda: self._attempt_ble_reconnect(slot_index))
+            except Exception:
+                self.root.after(3000, lambda: self._attempt_ble_reconnect(slot_index))
+
+        self.root.after(200, lambda: _check_reconnect(future))
 
     def auto_connect_and_emulate(self):
         """Auto-connect all available controllers and start emulation.
@@ -394,7 +701,10 @@ class GCControllerEnabler:
             slot.emu_mgr.stop()
             sui.emulate_btn.config(text="Start Emulation")
             if slot.is_connected:
-                self.ui.update_status(slot_index, "Connected via HID")
+                if slot.ble_connected:
+                    self.ui.update_status(slot_index, "Connected via BLE")
+                else:
+                    self.ui.update_status(slot_index, "Connected via HID")
             else:
                 self.ui.update_status(slot_index, "Ready to connect")
             self.ui.update_tab_status(slot_index, connected=slot.is_connected, emulating=False)
@@ -493,6 +803,12 @@ class GCControllerEnabler:
             if selected is not None:
                 cal['preferred_device_path'] = selected.decode('utf-8', errors='replace')
 
+            # Save BLE state
+            slot = self.slots[i]
+            cal['connection_mode'] = slot.connection_mode
+            if slot.ble_address:
+                cal['preferred_ble_address'] = slot.ble_address
+
         # Global settings stored in slot 0's calibration
         self.slot_calibrations[0]['auto_connect'] = self.ui.auto_connect_var.get()
 
@@ -551,6 +867,17 @@ class GCControllerEnabler:
             slot.input_proc.stop()
             slot.emu_mgr.stop()
             slot.conn_mgr.disconnect()
+
+        # Clean up BLE
+        if self._bumble_backend and self._ble_event_loop:
+            try:
+                future = self._ble_event_loop.submit(self._bumble_backend.close())
+                future.result(timeout=5.0)
+            except Exception:
+                pass
+        if self._ble_event_loop:
+            self._ble_event_loop.stop()
+
         self.root.destroy()
 
     def run(self):

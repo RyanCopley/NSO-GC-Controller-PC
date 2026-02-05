@@ -85,6 +85,8 @@ DEFAULT_CALIBRATION = {
     'stick_right_center_y': 2048, 'stick_right_range_y': 2048,
     'auto_connect': False,
     'preferred_device_path': '',
+    'connection_mode': 'usb',
+    'preferred_ble_address': '',
     'stick_left_octagon': None,
     'stick_right_octagon': None,
 }

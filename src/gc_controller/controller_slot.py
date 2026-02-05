@@ -5,6 +5,7 @@ Bundles per-controller state for multi-controller support.
 Each slot has its own managers, calibration, and device connection.
 """
 
+import queue
 from typing import Optional
 
 from .calibration import CalibrationManager
@@ -27,6 +28,12 @@ class ControllerSlot:
         self.device_path: Optional[bytes] = None
         self.reconnect_was_emulating = False
 
+        # BLE state
+        self.connection_mode: str = calibration.get('connection_mode', 'usb')
+        self.ble_address: Optional[str] = calibration.get('preferred_ble_address', '') or None
+        self.ble_data_queue: queue.Queue = queue.Queue(maxsize=64)
+        self.ble_connected: bool = False
+
         self.cal_mgr = CalibrationManager(calibration)
         self.conn_mgr = ConnectionManager(on_status=on_status, on_progress=on_progress)
         self.emu_mgr = EmulationManager(self.cal_mgr)
@@ -38,6 +45,7 @@ class ControllerSlot:
             on_ui_update=on_ui_update,
             on_error=on_error,
             on_disconnect=on_disconnect,
+            ble_queue=self.ble_data_queue,
         )
 
     @property
