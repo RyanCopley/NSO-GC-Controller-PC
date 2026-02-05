@@ -1,13 +1,14 @@
 """
 Virtual Gamepad Platform Abstraction Layer
 
-Provides a unified interface for Xbox 360 controller emulation across platforms:
-- Windows: vgamepad (ViGEmBus)
-- Linux: python-evdev (uinput)
-- macOS: Not supported
+Provides a unified interface for controller emulation across platforms:
+- Xbox 360 mode: Windows (vgamepad/ViGEmBus), Linux (python-evdev/uinput)
+- Dolphin pipe mode: macOS and Linux (named pipe / FIFO)
 """
 
+import errno
 import os
+import stat
 import sys
 from abc import ABC, abstractmethod
 from enum import Enum, auto
@@ -289,8 +290,165 @@ class LinuxGamepad(VirtualGamepad):
             pass
 
 
-def is_emulation_available() -> bool:
+_FLATPAK_DOLPHIN_DATA = os.path.expanduser(
+    '~/.var/app/org.DolphinEmu.dolphin-emu/data/dolphin-emu')
+
+
+def _get_dolphin_user_dir() -> str:
+    """Determine the Dolphin user directory using the same priority as Dolphin itself.
+
+    On macOS: ~/Library/Application Support/Dolphin
+    On Linux (per Dolphin UICommon.cpp):
+      1. $DOLPHIN_EMU_USERPATH if set
+      2. Flatpak data dir if it exists (Flatpak ignores ~/.dolphin-emu)
+      3. ~/.dolphin-emu if it already exists (legacy compat)
+      4. $XDG_DATA_HOME/dolphin-emu (defaults to ~/.local/share/dolphin-emu)
+    """
+    if sys.platform == 'darwin':
+        return os.path.expanduser('~/Library/Application Support/Dolphin')
+
+    # Linux
+    env_path = os.environ.get('DOLPHIN_EMU_USERPATH')
+    if env_path:
+        return env_path
+
+    # Flatpak Dolphin uses its own sandboxed XDG dirs and cannot see
+    # ~/.dolphin-emu, so check for the Flatpak data dir first.
+    if os.path.isdir(_FLATPAK_DOLPHIN_DATA):
+        return _FLATPAK_DOLPHIN_DATA
+
+    legacy = os.path.expanduser('~/.dolphin-emu')
+    if os.path.isdir(legacy):
+        return legacy
+
+    xdg_data = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
+    return os.path.join(xdg_data, 'dolphin-emu')
+
+
+def ensure_dolphin_pipe(pipe_name: str = 'gc_controller') -> str:
+    """Create the Dolphin named-pipe FIFO on disk if it doesn't exist.
+
+    Call this early (e.g. at app startup) so the pipe file is visible in
+    Dolphin's controller device list before emulation is started.
+
+    Returns the full path to the pipe.
+    """
+    pipe_dir = os.path.join(_get_dolphin_user_dir(), 'Pipes')
+
+    os.makedirs(pipe_dir, exist_ok=True)
+    pipe_path = os.path.join(pipe_dir, pipe_name)
+
+    if not os.path.exists(pipe_path):
+        os.mkfifo(pipe_path)
+    elif not stat.S_ISFIFO(os.stat(pipe_path).st_mode):
+        raise RuntimeError(
+            f"{pipe_path} exists but is not a FIFO. "
+            "Remove it and try again.")
+
+    return pipe_path
+
+
+class DolphinPipeGamepad(VirtualGamepad):
+    """Dolphin named pipe implementation for macOS and Linux.
+
+    Sends controller input to Dolphin Emulator via a Unix FIFO using
+    the Dolphin pipe input protocol.  No virtual HID device or special
+    drivers are required.
+    """
+
+    _BUTTON_MAP = {
+        GamepadButton.A: 'A',
+        GamepadButton.B: 'B',
+        GamepadButton.X: 'X',
+        GamepadButton.Y: 'Y',
+        GamepadButton.START: 'START',
+        GamepadButton.RIGHT_SHOULDER: 'Z',
+        GamepadButton.LEFT_SHOULDER: 'L',
+        GamepadButton.DPAD_UP: 'D_UP',
+        GamepadButton.DPAD_DOWN: 'D_DOWN',
+        GamepadButton.DPAD_LEFT: 'D_LEFT',
+        GamepadButton.DPAD_RIGHT: 'D_RIGHT',
+    }
+
+    def __init__(self, pipe_name: str = 'gc_controller'):
+        self._pipe_path = ensure_dolphin_pipe(pipe_name)
+
+        # Open the pipe for writing (non-blocking so we get ENXIO immediately
+        # if Dolphin hasn't opened the read end yet).
+        try:
+            fd = os.open(self._pipe_path, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as e:
+            if e.errno == errno.ENXIO:
+                raise OSError(
+                    errno.ENXIO,
+                    "Dolphin is not reading the pipe. "
+                    "Please configure the pipe controller in Dolphin first.\n"
+                    f"Pipe path: {self._pipe_path}")
+            raise
+
+        self._pipe = os.fdopen(fd, 'w')
+        self._pressed: set[str] = set()
+
+    def left_joystick(self, x_value: int, y_value: int) -> None:
+        x = (x_value / 32767 + 1) / 2
+        y = (y_value / 32767 + 1) / 2
+        self._pipe.write(f'SET MAIN {x:.4f} {y:.4f}\n')
+
+    def right_joystick(self, x_value: int, y_value: int) -> None:
+        x = (x_value / 32767 + 1) / 2
+        y = (y_value / 32767 + 1) / 2
+        self._pipe.write(f'SET C {x:.4f} {y:.4f}\n')
+
+    def left_trigger(self, value: int) -> None:
+        self._pipe.write(f'SET L {value / 255:.4f}\n')
+
+    def right_trigger(self, value: int) -> None:
+        self._pipe.write(f'SET R {value / 255:.4f}\n')
+
+    def press_button(self, button: GamepadButton) -> None:
+        name = self._BUTTON_MAP.get(button)
+        if name is None:
+            return
+        self._pipe.write(f'PRESS {name}\n')
+        self._pressed.add(name)
+
+    def release_button(self, button: GamepadButton) -> None:
+        name = self._BUTTON_MAP.get(button)
+        if name is None:
+            return
+        self._pipe.write(f'RELEASE {name}\n')
+        self._pressed.discard(name)
+
+    def update(self) -> None:
+        self._pipe.flush()
+
+    def reset(self) -> None:
+        self._pipe.write('SET MAIN 0.5000 0.5000\n')
+        self._pipe.write('SET C 0.5000 0.5000\n')
+        self._pipe.write('SET L 0.0000\n')
+        self._pipe.write('SET R 0.0000\n')
+        for name in list(self._pressed):
+            self._pipe.write(f'RELEASE {name}\n')
+        self._pressed.clear()
+        self._pipe.flush()
+
+    def close(self) -> None:
+        try:
+            self.reset()
+        except Exception:
+            pass
+        try:
+            self._pipe.close()
+        except Exception:
+            pass
+
+
+def is_emulation_available(mode: str = 'xbox360') -> bool:
     """Check whether virtual gamepad emulation is available on this platform."""
+    if mode == 'dolphin_pipe':
+        return sys.platform in ('darwin', 'linux')
+
+    # Xbox 360 mode
     if sys.platform == "win32":
         try:
             import vgamepad
@@ -307,8 +465,12 @@ def is_emulation_available() -> bool:
         return False
 
 
-def get_emulation_unavailable_reason() -> str:
+def get_emulation_unavailable_reason(mode: str = 'xbox360') -> str:
     """Return a human-readable explanation of why emulation is unavailable."""
+    if mode == 'dolphin_pipe':
+        return "Dolphin pipe emulation is only supported on macOS and Linux."
+
+    # Xbox 360 mode
     if sys.platform == "win32":
         return (
             "Xbox 360 emulation requires vgamepad and ViGEmBus driver.\n"
@@ -330,8 +492,12 @@ def get_emulation_unavailable_reason() -> str:
         return f"Xbox 360 emulation is not supported on {sys.platform}."
 
 
-def create_gamepad() -> VirtualGamepad:
-    """Factory: create the appropriate VirtualGamepad for the current platform."""
+def create_gamepad(mode: str = 'xbox360') -> VirtualGamepad:
+    """Factory: create the appropriate VirtualGamepad for the current platform/mode."""
+    if mode == 'dolphin_pipe':
+        return DolphinPipeGamepad()
+
+    # Xbox 360 mode
     if sys.platform == "win32":
         return WindowsGamepad()
     elif sys.platform == "linux":

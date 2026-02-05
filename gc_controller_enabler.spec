@@ -18,12 +18,12 @@ block_cipher = None
 
 # Data files to include
 datas = []
-if os.path.exists('controller.png'):
-    datas.append(('controller.png', '.'))
-if os.path.exists('stick_left.png'):
-    datas.append(('stick_left.png', '.'))
-if os.path.exists('stick_right.png'):
-    datas.append(('stick_right.png', '.'))
+if os.path.exists(os.path.join('images', 'controller.png')):
+    datas.append((os.path.join('images', 'controller.png'), '.'))
+if os.path.exists(os.path.join('images', 'stick_left.png')):
+    datas.append((os.path.join('images', 'stick_left.png'), '.'))
+if os.path.exists(os.path.join('images', 'stick_right.png')):
+    datas.append((os.path.join('images', 'stick_right.png'), '.'))
 
 # Add vgamepad DLLs for Windows
 if sys.platform == "win32":
@@ -51,7 +51,14 @@ hiddenimports = [
     'hid',
     'usb.core',
     'usb.util',
-    'virtual_gamepad',
+    'gc_controller.virtual_gamepad',
+    'gc_controller.controller_constants',
+    'gc_controller.settings_manager',
+    'gc_controller.calibration',
+    'gc_controller.connection_manager',
+    'gc_controller.emulation_manager',
+    'gc_controller.controller_ui',
+    'gc_controller.input_processor',
     'tkinter',
     'tkinter.ttk',
     '_tkinter',
@@ -71,8 +78,8 @@ elif sys.platform == "linux":
     ]
 
 a = Analysis(
-    ['gc_controller_enabler.py'],
-    pathex=[],
+    ['src/gc_controller/__main__.py'],
+    pathex=['src'],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

@@ -1,4 +1,4 @@
-![Screenshot](Screenshot%202025-07-14%20204357.png)
+![Screenshot](images/Screenshot%202025-07-14%20204357.png)
 
 # GameCube Controller Enabler
 
@@ -45,9 +45,10 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ## Usage
 
-Run the application:
+Install in development mode and run:
 ```bash
-python gc_controller_enabler.py
+pip install -e .
+python -m gc_controller
 ```
 
 1. Connect your GameCube controller via USB
@@ -82,10 +83,26 @@ Trigger modes:
 ## Project Structure
 
 ```
-gc_controller_enabler.py    Main application
-virtual_gamepad.py          Cross-platform gamepad abstraction
+src/gc_controller/
+  __init__.py               Package marker
+  __main__.py               Entry point (python -m gc_controller)
+  app.py                    Main application orchestrator
+  controller_constants.py   Shared constants, button mappings, calibration defaults
+  settings_manager.py       JSON settings load/save
+  calibration.py            Stick and trigger calibration logic
+  connection_manager.py     USB initialization and HID connection
+  emulation_manager.py      Xbox 360 virtual controller emulation
+  controller_ui.py          Tkinter UI widgets and display updates
+  input_processor.py        HID read thread and data processing
+  virtual_gamepad.py        Cross-platform gamepad abstraction
+pyproject.toml              Project metadata and dependencies
 gc_controller_enabler.spec  PyInstaller spec file
 build_all.py                Unified build script
+images/
+  controller.png            Application icon
+  stick_left.png            Left stick icon
+  stick_right.png           Right stick icon
+  Screenshot *.png          Application screenshot
 platform/
   linux/
     build.sh                Linux build script

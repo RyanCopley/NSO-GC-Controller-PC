@@ -21,14 +21,22 @@ mkdir -p dist
 echo "Building executable..."
 pyinstaller --onefile \
     --name "GC-Controller-Enabler" \
-    --icon=controller.png \
-    --add-data "controller.png:." \
-    --add-data "stick_left.png:." \
-    --add-data "stick_right.png:." \
+    --icon=images/controller.png \
+    --add-data "images/controller.png:." \
+    --add-data "images/stick_left.png:." \
+    --add-data "images/stick_right.png:." \
+    --paths src \
     --hidden-import evdev \
-    --hidden-import virtual_gamepad \
+    --hidden-import gc_controller.virtual_gamepad \
+    --hidden-import gc_controller.controller_constants \
+    --hidden-import gc_controller.settings_manager \
+    --hidden-import gc_controller.calibration \
+    --hidden-import gc_controller.connection_manager \
+    --hidden-import gc_controller.emulation_manager \
+    --hidden-import gc_controller.controller_ui \
+    --hidden-import gc_controller.input_processor \
     --distpath dist/linux \
-    gc_controller_enabler.py
+    src/gc_controller/__main__.py
 
 echo "Build complete! Executable is in dist/linux/"
 echo ""

@@ -70,7 +70,8 @@ def build_with_pyinstaller(output_dir):
         "--windowed" if platform.system() != "Linux" else "",
         "--name", "GC-Controller-Enabler",
         "--distpath", output_dir,
-        "gc_controller_enabler.py"
+        "--paths", "src",
+        "src/gc_controller/__main__.py"
     ]
     # Remove empty strings
     cmd = [c for c in cmd if c]
