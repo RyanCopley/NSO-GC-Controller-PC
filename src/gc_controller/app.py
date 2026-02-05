@@ -4,6 +4,7 @@ GameCube Controller Enabler - Python/Tkinter Version
 
 Converts GameCube controllers to work with Steam and other applications.
 Handles USB initialization, HID communication, and Xbox 360 controller emulation.
+Supports up to 4 simultaneous controllers.
 
 Requirements:
     pip install hidapi pyusb
@@ -30,19 +31,21 @@ except ImportError as e:
 from .virtual_gamepad import (
     is_emulation_available, get_emulation_unavailable_reason, ensure_dolphin_pipe,
 )
-from .controller_constants import DEFAULT_CALIBRATION
+from .controller_constants import DEFAULT_CALIBRATION, MAX_SLOTS
 from .settings_manager import SettingsManager
 from .calibration import CalibrationManager
 from .connection_manager import ConnectionManager
 from .emulation_manager import EmulationManager
 from .input_processor import InputProcessor
+from .controller_slot import ControllerSlot
 
-# Create the Dolphin pipe FIFO early so it shows up in Dolphin's device list
+# Create Dolphin pipe FIFOs early so they show up in Dolphin's device list
 if sys.platform in ('darwin', 'linux'):
-    try:
-        ensure_dolphin_pipe()
-    except Exception as e:
-        print(f"Note: Could not create Dolphin pipe: {e}")
+    for _pipe_idx in range(MAX_SLOTS):
+        try:
+            ensure_dolphin_pipe(f'gc_controller_{_pipe_idx + 1}')
+        except Exception as e:
+            print(f"Note: Could not create Dolphin pipe {_pipe_idx + 1}: {e}")
 
 
 class GCControllerEnabler:
@@ -60,152 +63,343 @@ class GCControllerEnabler:
         self.root.title("GameCube Controller Enabler")
         self.root.resizable(False, False)
 
-        # Shared calibration dict (passed by reference to all managers)
-        self.calibration = dict(DEFAULT_CALIBRATION)
+        # Per-slot calibration dicts
+        self.slot_calibrations = [dict(DEFAULT_CALIBRATION) for _ in range(MAX_SLOTS)]
 
         # Settings
-        self.settings_mgr = SettingsManager(self.calibration, os.getcwd())
+        self.settings_mgr = SettingsManager(self.slot_calibrations, os.getcwd())
         self.settings_mgr.load()
 
-        # Calibration
-        self.cal_mgr = CalibrationManager(self.calibration)
+        # Create slots (each with own managers)
+        self.slots: list[ControllerSlot] = []
+        for i in range(MAX_SLOTS):
+            slot = ControllerSlot(
+                index=i,
+                calibration=self.slot_calibrations[i],
+                on_status=lambda msg, idx=i: self._schedule_status(idx, msg),
+                on_progress=lambda val, idx=i: self._schedule_progress(idx, val),
+                on_ui_update=lambda *args, idx=i: self._schedule_ui_update(idx, *args),
+                on_error=lambda msg, idx=i: self.root.after(
+                    0, lambda m=msg: self.ui.update_status(idx, m)),
+                on_disconnect=lambda idx=i: self.root.after(
+                    0, lambda: self._on_unexpected_disconnect(idx)),
+            )
+            self.slots.append(slot)
 
-        # Connection
-        self.conn_mgr = ConnectionManager(
-            on_status=self._schedule_status,
-            on_progress=self._schedule_progress,
-        )
-
-        # Emulation
-        self.emu_mgr = EmulationManager(self.cal_mgr)
-
-        # UI
+        # UI — pass list of cal_mgrs for live octagon drawing
         self.ui = ControllerUI(
-            self.root, self.calibration, self.cal_mgr,
+            self.root,
+            slot_calibrations=self.slot_calibrations,
+            slot_cal_mgrs=[s.cal_mgr for s in self.slots],
             on_connect=self.connect_controller,
             on_emulate=self.toggle_emulation,
             on_stick_cal=self.toggle_stick_calibration,
             on_trigger_cal=self.trigger_cal_step,
             on_save=self.save_settings,
+            on_refresh=self.refresh_devices,
         )
 
-        # Input processor
-        self.input_proc = InputProcessor(
-            device_getter=lambda: self.conn_mgr.device,
-            calibration=self.calibration,
-            cal_mgr=self.cal_mgr,
-            emu_mgr=self.emu_mgr,
-            on_ui_update=self._schedule_ui_update,
-            on_error=lambda msg: self.root.after(0, lambda: self.ui.update_status(msg)),
-            on_disconnect=lambda: self.root.after(0, self._on_unexpected_disconnect),
-        )
+        # Now that UI is built, draw initial trigger markers for all slots
+        for i in range(MAX_SLOTS):
+            self.ui.draw_trigger_markers(i)
+
+        # Populate device dropdowns and restore saved selections
+        self.refresh_devices()
+        for i in range(MAX_SLOTS):
+            saved = self.slot_calibrations[i].get('preferred_device_path', '')
+            if saved:
+                self.ui.select_device_by_path(i, saved.encode('utf-8'))
 
         # Handle window closing
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         # Auto-connect if enabled
-        if self.calibration['auto_connect']:
+        if self.slot_calibrations[0]['auto_connect']:
             self.root.after(100, self.auto_connect_and_emulate)
 
     # ── Connection ───────────────────────────────────────────────────
 
-    def connect_controller(self):
-        """Connect to GameCube controller."""
-        if self.input_proc.is_reading:
-            self.disconnect_controller()
+    def connect_controller(self, slot_index: int):
+        """Connect to GameCube controller on a specific slot."""
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        if slot.is_connected:
+            self.disconnect_controller(slot_index)
             return
 
-        self.ui.progress['value'] = 0
+        sui.progress['value'] = 0
 
-        if not self.conn_mgr.connect():
+        # Enumerate available HID devices
+        all_hid = ConnectionManager.enumerate_devices()
+
+        # Filter out paths already claimed by other slots
+        claimed_paths = set()
+        for i, s in enumerate(self.slots):
+            if i != slot_index and s.is_connected and s.conn_mgr.device_path:
+                claimed_paths.add(s.conn_mgr.device_path)
+
+        # Check if user selected a specific device
+        selected_path = self.ui.get_selected_device_path(slot_index)
+
+        if selected_path is not None:
+            # User picked a specific device
+            if selected_path in claimed_paths:
+                self.ui.update_status(slot_index,
+                                      "Selected device is in use by another slot")
+                return
+            # Verify it still exists
+            if not any(d['path'] == selected_path for d in all_hid):
+                self.ui.update_status(slot_index,
+                                      "Selected device not found — try Refresh")
+                return
+            target_path = selected_path
+        else:
+            # Auto — pick first unclaimed
+            available = [d for d in all_hid if d['path'] not in claimed_paths]
+            if not available:
+                self.ui.update_status(slot_index, "No unclaimed controllers found")
+                return
+            target_path = available[0]['path']
+
+        # Initialize all USB devices (send init data)
+        usb_devices = ConnectionManager.enumerate_usb_devices()
+        for usb_dev in usb_devices:
+            slot.conn_mgr.initialize_via_usb(usb_device=usb_dev)
+
+        # Open specific HID device by path
+        if not slot.conn_mgr.init_hid_device(device_path=target_path):
             return
 
-        self.input_proc.start()
+        slot.device_path = target_path
 
-        self.ui.connect_btn.config(text="Disconnect")
-        self.ui.emulate_btn.config(state='normal')
+        # Save the path as the preferred device for this slot
+        path_str = target_path.decode('utf-8', errors='replace')
+        old_pref = self.slot_calibrations[slot_index].get('preferred_device_path', '')
+        self.slot_calibrations[slot_index]['preferred_device_path'] = path_str
+        if path_str != old_pref:
+            self.ui.mark_slot_dirty(slot_index)
 
-    def disconnect_controller(self):
-        """Disconnect from controller."""
-        self.input_proc.stop()
-        self.emu_mgr.stop()
+        slot.input_proc.start()
 
-        self.conn_mgr.disconnect()
+        sui.connect_btn.config(text="Disconnect")
+        sui.emulate_btn.config(state='normal')
+        self.ui.update_tab_status(slot_index, connected=True, emulating=False)
+        self.refresh_devices()
 
-        self.ui.connect_btn.config(text="Connect")
-        self.ui.emulate_btn.config(state='disabled')
-        self.ui.emulate_btn.config(text="Start Emulation")
-        self.ui.progress['value'] = 0
-        self.ui.update_status("Disconnected")
-        self.ui.reset_ui_elements()
+    def disconnect_controller(self, slot_index: int):
+        """Disconnect from controller on a specific slot."""
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        slot.input_proc.stop()
+        slot.emu_mgr.stop()
+        slot.conn_mgr.disconnect()
+        slot.device_path = None
+
+        sui.connect_btn.config(text="Connect")
+        sui.emulate_btn.config(state='disabled')
+        sui.emulate_btn.config(text="Start Emulation")
+        sui.progress['value'] = 0
+        self.ui.update_status(slot_index, "Disconnected")
+        self.ui.reset_slot_ui(slot_index)
+        self.ui.update_tab_status(slot_index, connected=False, emulating=False)
+        self.refresh_devices()
 
     def auto_connect_and_emulate(self):
-        """Auto-connect and start emulation on startup."""
-        self.connect_controller()
-        if self.input_proc.is_reading:
-            self.toggle_emulation()
+        """Auto-connect all available controllers and start emulation.
+
+        Respects preferred_device_path settings: if slot N has a saved preference
+        and that device is available, it gets that device.
+        """
+        all_hid = ConnectionManager.enumerate_devices()
+        if not all_hid:
+            return
+
+        # Initialize all USB devices first
+        usb_devices = ConnectionManager.enumerate_usb_devices()
+        for usb_dev in usb_devices:
+            tmp = ConnectionManager(
+                on_status=lambda msg: None,
+                on_progress=lambda val: None,
+            )
+            tmp.initialize_via_usb(usb_device=usb_dev)
+
+        all_paths = {d['path'] for d in all_hid}
+        claimed_paths = set()
+
+        # First pass: assign preferred devices to their slots
+        for i in range(MAX_SLOTS):
+            saved = self.slot_calibrations[i].get('preferred_device_path', '')
+            if not saved:
+                continue
+            pref_bytes = saved.encode('utf-8')
+            if pref_bytes in all_paths and pref_bytes not in claimed_paths:
+                slot = self.slots[i]
+                sui = self.ui.slots[i]
+                if slot.conn_mgr.init_hid_device(device_path=pref_bytes):
+                    claimed_paths.add(pref_bytes)
+                    slot.device_path = pref_bytes
+                    slot.input_proc.start()
+                    sui.connect_btn.config(text="Disconnect")
+                    sui.emulate_btn.config(state='normal')
+                    self.ui.update_tab_status(i, connected=True, emulating=False)
+                    self.toggle_emulation(i)
+
+        # Second pass: fill remaining slots with unclaimed devices
+        for i in range(MAX_SLOTS):
+            if self.slots[i].is_connected:
+                continue
+            target = None
+            for d in all_hid:
+                if d['path'] not in claimed_paths:
+                    target = d
+                    break
+            if target is None:
+                break
+
+            slot = self.slots[i]
+            sui = self.ui.slots[i]
+            path = target['path']
+
+            if slot.conn_mgr.init_hid_device(device_path=path):
+                claimed_paths.add(path)
+                slot.device_path = path
+                slot.input_proc.start()
+                sui.connect_btn.config(text="Disconnect")
+                sui.emulate_btn.config(state='normal')
+                self.ui.update_tab_status(i, connected=True, emulating=False)
+                self.toggle_emulation(i)
+
+        self.refresh_devices()
+
+    # ── Device enumeration ────────────────────────────────────────────
+
+    def refresh_devices(self):
+        """Refresh device dropdowns for all slots."""
+        all_hid = ConnectionManager.enumerate_devices()
+
+        # Build a map of claimed paths -> slot index
+        claimed_map = {}
+        for i, s in enumerate(self.slots):
+            if s.is_connected and s.conn_mgr.device_path:
+                claimed_map[s.conn_mgr.device_path] = i
+
+        for i in range(MAX_SLOTS):
+            self.ui.set_device_list(i, all_hid, claimed_map)
 
     # ── Auto-reconnect ──────────────────────────────────────────────
 
-    def _on_unexpected_disconnect(self):
-        """Handle an unexpected controller disconnect by attempting to reconnect."""
-        if self.conn_mgr.device:
+    def _on_unexpected_disconnect(self, slot_index: int):
+        """Handle an unexpected controller disconnect on a specific slot."""
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        if slot.conn_mgr.device:
             try:
-                self.conn_mgr.device.close()
+                slot.conn_mgr.device.close()
             except Exception:
                 pass
-            self.conn_mgr.device = None
+            slot.conn_mgr.device = None
 
-        was_emulating = self.emu_mgr.is_emulating
+        slot.reconnect_was_emulating = slot.emu_mgr.is_emulating
 
-        if self.emu_mgr.is_emulating:
-            self.emu_mgr.stop()
+        if slot.emu_mgr.is_emulating:
+            slot.emu_mgr.stop()
 
-        self.ui.update_status("Controller disconnected — reconnecting...")
-        self.ui.connect_btn.config(text="Connect")
-        self.ui.emulate_btn.config(state='disabled')
-        self.ui.progress['value'] = 0
+        self.ui.update_status(slot_index, "Controller disconnected — reconnecting...")
+        sui.connect_btn.config(text="Connect")
+        sui.emulate_btn.config(state='disabled')
+        sui.progress['value'] = 0
+        self.ui.update_tab_status(slot_index, connected=False, emulating=False)
 
-        self._reconnect_was_emulating = was_emulating
-        self._attempt_reconnect()
+        self._attempt_reconnect(slot_index)
 
-    def _attempt_reconnect(self):
-        """Try to reconnect to the controller. Retries every 2 seconds."""
+    def _attempt_reconnect(self, slot_index: int):
+        """Try to reconnect controller on a specific slot. Retries every 2 seconds."""
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
         # User clicked Disconnect while we were waiting — abort.
-        if self.input_proc.stop_event.is_set():
-            self.ui.update_status("Disconnected")
-            self.ui.reset_ui_elements()
+        if slot.input_proc.stop_event.is_set():
+            self.ui.update_status(slot_index, "Disconnected")
+            self.ui.reset_slot_ui(slot_index)
+            self.ui.update_tab_status(slot_index, connected=False, emulating=False)
             return
 
-        if self.conn_mgr.connect():
-            self.input_proc.start()
-            self.ui.connect_btn.config(text="Disconnect")
-            self.ui.emulate_btn.config(state='normal')
-            self.ui.update_status("Reconnected")
+        # Build set of paths claimed by other slots
+        claimed_paths = set()
+        for i, s in enumerate(self.slots):
+            if i != slot_index and s.is_connected and s.conn_mgr.device_path:
+                claimed_paths.add(s.conn_mgr.device_path)
 
-            if getattr(self, '_reconnect_was_emulating', False):
-                self._reconnect_was_emulating = False
-                self.toggle_emulation()
-            return
+        all_hid = ConnectionManager.enumerate_devices()
+        all_paths = {d['path'] for d in all_hid}
+
+        # Priority order: remembered runtime path, then saved preferred path, then any unclaimed
+        target_path = None
+        candidates = []
+        if slot.device_path:
+            candidates.append(slot.device_path)
+        saved_pref = self.slot_calibrations[slot_index].get('preferred_device_path', '')
+        if saved_pref:
+            pref_bytes = saved_pref.encode('utf-8')
+            if pref_bytes not in candidates:
+                candidates.append(pref_bytes)
+
+        for candidate in candidates:
+            if candidate in all_paths and candidate not in claimed_paths:
+                target_path = candidate
+                break
+
+        if target_path is None:
+            for d in all_hid:
+                if d['path'] not in claimed_paths:
+                    target_path = d['path']
+                    break
+
+        if target_path:
+            # Init all USB devices
+            usb_devices = ConnectionManager.enumerate_usb_devices()
+            for usb_dev in usb_devices:
+                slot.conn_mgr.initialize_via_usb(usb_device=usb_dev)
+
+            if slot.conn_mgr.init_hid_device(device_path=target_path):
+                slot.device_path = target_path
+                slot.input_proc.start()
+                sui.connect_btn.config(text="Disconnect")
+                sui.emulate_btn.config(state='normal')
+                self.ui.update_status(slot_index, "Reconnected")
+                self.ui.update_tab_status(slot_index, connected=True, emulating=False)
+                self.refresh_devices()
+
+                if slot.reconnect_was_emulating:
+                    slot.reconnect_was_emulating = False
+                    self.toggle_emulation(slot_index)
+                return
 
         # Failed — retry after a delay
-        self.ui.update_status("Controller disconnected — reconnecting...")
-        self.ui.progress['value'] = 0
-        self.root.after(2000, self._attempt_reconnect)
+        self.ui.update_status(slot_index, "Controller disconnected — reconnecting...")
+        sui.progress['value'] = 0
+        self.root.after(2000, lambda: self._attempt_reconnect(slot_index))
 
     # ── Emulation ────────────────────────────────────────────────────
 
-    def toggle_emulation(self):
-        """Start or stop controller emulation in the selected mode."""
-        if self.emu_mgr.is_emulating:
-            self.emu_mgr.stop()
-            self.ui.emulate_btn.config(text="Start Emulation")
-            if self.input_proc.is_reading:
-                self.ui.update_status("Connected via HID")
+    def toggle_emulation(self, slot_index: int):
+        """Start or stop controller emulation for a specific slot."""
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        if slot.emu_mgr.is_emulating:
+            slot.emu_mgr.stop()
+            sui.emulate_btn.config(text="Start Emulation")
+            if slot.is_connected:
+                self.ui.update_status(slot_index, "Connected via HID")
             else:
-                self.ui.update_status("Ready to connect")
+                self.ui.update_status(slot_index, "Ready to connect")
+            self.ui.update_tab_status(slot_index, connected=slot.is_connected, emulating=False)
         else:
-            mode = self.ui.emu_mode_var.get()
+            mode = sui.emu_mode_var.get()
 
             if not is_emulation_available(mode):
                 self._messagebox.showerror(
@@ -215,26 +409,32 @@ class GCControllerEnabler:
                 return
 
             try:
-                self.emu_mgr.start(mode)
-                self.ui.emulate_btn.config(text="Stop Emulation")
+                slot.emu_mgr.start(mode, slot_index=slot_index)
+                sui.emulate_btn.config(text="Stop Emulation")
+                pipe_name = f'gc_controller_{slot_index + 1}'
                 if mode == 'dolphin_pipe':
-                    self.ui.update_status("Dolphin pipe emulation active")
+                    self.ui.update_status(slot_index,
+                                          f"Dolphin pipe emulation active ({pipe_name})")
                 else:
-                    self.ui.update_status("Xbox 360 emulation active")
+                    self.ui.update_status(slot_index, "Xbox 360 emulation active")
+                self.ui.update_tab_status(slot_index, connected=True, emulating=True)
             except OSError as e:
                 if e.errno == errno.ENXIO:
+                    pipe_name = f'gc_controller_{slot_index + 1}'
                     self._messagebox.showerror(
                         "Emulation Error",
                         "Dolphin is not reading the pipe.\n\n"
                         "You may need to restart Dolphin if this is the first "
                         "time you've launched this tool.\n\n"
                         "To configure the pipe controller in Dolphin:\n"
-                        "1. Open Controllers (top menu bar)\n"
-                        "2. Under GameCube, set Port 1 to 'Standard Controller'\n"
-                        "3. Click 'Configure' next to Port 1\n"
-                        "4. In the Device dropdown, select 'Pipe/0/gc_controller'\n"
-                        "5. Update your button/stick/trigger bindings for the pipe device\n"
-                        "6. Click Close, then try Start Emulation again")
+                        f"1. Open Controllers (top menu bar)\n"
+                        f"2. Under GameCube, set Port {slot_index + 1} to "
+                        f"'Standard Controller'\n"
+                        f"3. Click 'Configure' next to Port {slot_index + 1}\n"
+                        f"4. In the Device dropdown, select "
+                        f"'Pipe/0/{pipe_name}'\n"
+                        f"5. Update your button/stick/trigger bindings\n"
+                        f"6. Click Close, then try Start Emulation again")
                 else:
                     self._messagebox.showerror("Emulation Error",
                                                f"Failed to start emulation: {e}")
@@ -244,90 +444,113 @@ class GCControllerEnabler:
 
     # ── Stick calibration ────────────────────────────────────────────
 
-    def toggle_stick_calibration(self):
-        """Toggle stick calibration on/off."""
-        if self.cal_mgr.stick_calibrating:
-            self.cal_mgr.finish_stick_calibration()
-            self.ui.redraw_octagons()
-            self.ui.stick_cal_btn.config(text="Calibrate Sticks")
-            self.ui.stick_cal_status.config(text="Calibration complete!")
+    def toggle_stick_calibration(self, slot_index: int):
+        """Toggle stick calibration on/off for a specific slot."""
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        if slot.cal_mgr.stick_calibrating:
+            slot.cal_mgr.finish_stick_calibration()
+            self.ui.redraw_octagons(slot_index)
+            sui.stick_cal_btn.config(text="Calibrate Sticks")
+            sui.stick_cal_status.config(text="Calibration complete!")
+            self.ui.mark_slot_dirty(slot_index)
         else:
-            self.cal_mgr.start_stick_calibration()
-            self.ui.stick_cal_btn.config(text="Finish Calibration")
-            self.ui.stick_cal_status.config(text="Move sticks to all extremes...")
+            slot.cal_mgr.start_stick_calibration()
+            sui.stick_cal_btn.config(text="Finish Calibration")
+            sui.stick_cal_status.config(text="Move sticks to all extremes...")
 
     # ── Trigger calibration ──────────────────────────────────────────
 
-    def trigger_cal_step(self):
-        """Advance the trigger calibration wizard one step."""
-        result = self.cal_mgr.trigger_cal_next_step()
+    def trigger_cal_step(self, slot_index: int):
+        """Advance the trigger calibration wizard one step for a specific slot."""
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        result = slot.cal_mgr.trigger_cal_next_step()
         if result is not None:
             step, btn_text, status_text = result
-            self.ui.trigger_cal_btn.config(text=btn_text)
-            self.ui.trigger_cal_status.config(text=status_text)
+            sui.trigger_cal_btn.config(text=btn_text)
+            sui.trigger_cal_status.config(text=status_text)
             if step == 0:
                 # Wizard finished — redraw markers
-                self.ui.draw_trigger_markers()
+                self.ui.draw_trigger_markers(slot_index)
+                self.ui.mark_slot_dirty(slot_index)
 
     # ── Settings ─────────────────────────────────────────────────────
 
     def update_calibration_from_ui(self):
-        """Update calibration values from UI variables."""
-        self.calibration['trigger_bump_100_percent'] = self.ui.trigger_mode_var.get()
-        self.calibration['emulation_mode'] = self.ui.emu_mode_var.get()
-        self.calibration['auto_connect'] = self.ui.auto_connect_var.get()
-        self.cal_mgr.refresh_cache()
+        """Update calibration values from UI variables for all slots."""
+        for i in range(MAX_SLOTS):
+            sui = self.ui.slots[i]
+            cal = self.slot_calibrations[i]
+            cal['trigger_bump_100_percent'] = sui.trigger_mode_var.get()
+            cal['emulation_mode'] = sui.emu_mode_var.get()
+            self.slots[i].cal_mgr.refresh_cache()
+
+            # Save preferred device path from dropdown (or from last connection)
+            selected = self.ui.get_selected_device_path(i)
+            if selected is not None:
+                cal['preferred_device_path'] = selected.decode('utf-8', errors='replace')
+
+        # Global settings stored in slot 0's calibration
+        self.slot_calibrations[0]['auto_connect'] = self.ui.auto_connect_var.get()
 
     def save_settings(self):
-        """Save calibration settings to file."""
+        """Save calibration settings for all slots to file."""
         self.update_calibration_from_ui()
         try:
             self.settings_mgr.save()
+            self.ui.mark_all_clean()
             self._messagebox.showinfo("Settings", "Settings saved successfully!")
         except Exception as e:
             self._messagebox.showerror("Error", f"Failed to save settings: {e}")
 
     # ── Thread-safe bridges ──────────────────────────────────────────
 
-    def _schedule_status(self, message: str):
+    def _schedule_status(self, slot_index: int, message: str):
         """Thread-safe status update via root.after."""
-        self.root.after(0, lambda: self.ui.update_status(message))
+        self.root.after(0, lambda: self.ui.update_status(slot_index, message))
 
-    def _schedule_progress(self, value: int):
+    def _schedule_progress(self, slot_index: int, value: int):
         """Thread-safe progress bar update via root.after."""
-        self.root.after(0, lambda: self.ui.progress.configure(value=value))
+        self.root.after(0, lambda: self.ui.slots[slot_index].progress.configure(value=value))
 
-    def _schedule_ui_update(self, left_x, left_y, right_x, right_y,
+    def _schedule_ui_update(self, slot_index: int, left_x, left_y, right_x, right_y,
                             left_trigger, right_trigger, button_states,
                             stick_calibrating):
-        """Schedule a UI update from the input thread."""
+        """Schedule a UI update from the input thread for a specific slot."""
         self.root.after(0, lambda: self._apply_ui_update(
-            left_x, left_y, right_x, right_y,
+            slot_index, left_x, left_y, right_x, right_y,
             left_trigger, right_trigger, button_states,
             stick_calibrating))
 
-    def _apply_ui_update(self, left_x, left_y, right_x, right_y,
+    def _apply_ui_update(self, slot_index: int, left_x, left_y, right_x, right_y,
                          left_trigger, right_trigger, button_states,
                          stick_calibrating):
-        """Apply UI updates on the main thread."""
+        """Apply UI updates on the main thread for a specific slot."""
+        s = self.ui.slots[slot_index]
+
         self.ui.update_stick_position(
-            self.ui.left_stick_canvas, self.ui.left_stick_dot, left_x, left_y)
+            s.left_stick_canvas, s.left_stick_dot, left_x, left_y)
         self.ui.update_stick_position(
-            self.ui.right_stick_canvas, self.ui.right_stick_dot, right_x, right_y)
-        self.ui.update_trigger_display(left_trigger, right_trigger)
-        self.ui.update_button_display(button_states)
+            s.right_stick_canvas, s.right_stick_dot, right_x, right_y)
+        self.ui.update_trigger_display(slot_index, left_trigger, right_trigger)
+        self.ui.update_button_display(slot_index, button_states)
 
         if stick_calibrating:
-            self.ui.draw_octagon_live(
-                self.ui.left_stick_canvas, self.ui.left_stick_dot, 'left')
-            self.ui.draw_octagon_live(
-                self.ui.right_stick_canvas, self.ui.right_stick_dot, 'right')
+            self.ui.draw_octagon_live(slot_index, 'left')
+            self.ui.draw_octagon_live(slot_index, 'right')
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
     def on_closing(self):
         """Handle application closing."""
-        self.disconnect_controller()
+        for i in range(MAX_SLOTS):
+            slot = self.slots[i]
+            slot.input_proc.stop()
+            slot.emu_mgr.stop()
+            slot.conn_mgr.disconnect()
         self.root.destroy()
 
     def run(self):
@@ -336,107 +559,232 @@ class GCControllerEnabler:
 
 
 def run_headless(mode_override: str = None):
-    """Run controller connection and emulation without the GUI."""
-    calibration = dict(DEFAULT_CALIBRATION)
+    """Run controller connection and emulation without the GUI.
 
-    settings_mgr = SettingsManager(calibration, os.getcwd())
+    Connects up to 4 controllers, each with its own emulation thread.
+    """
+    slot_calibrations = [dict(DEFAULT_CALIBRATION) for _ in range(MAX_SLOTS)]
+
+    settings_mgr = SettingsManager(slot_calibrations, os.getcwd())
     settings_mgr.load()
 
-    # Use explicit --mode if given, otherwise honor the saved setting
-    mode = mode_override if mode_override else calibration.get('emulation_mode', 'xbox360')
+    # Use explicit --mode if given, otherwise honor the saved setting from slot 0
+    mode = mode_override if mode_override else slot_calibrations[0].get('emulation_mode', 'xbox360')
 
     if not is_emulation_available(mode):
         print(f"Error: Emulation not available for mode '{mode}'.")
         print(get_emulation_unavailable_reason(mode))
         sys.exit(1)
 
-    cal_mgr = CalibrationManager(calibration)
-
-    conn_mgr = ConnectionManager(
-        on_status=lambda msg: print(f"[status] {msg}"),
-        on_progress=lambda val: None,
-    )
-
-    emu_mgr = EmulationManager(cal_mgr)
-
     stop_event = threading.Event()
-    disconnect_event = threading.Event()
+    disconnect_events = [threading.Event() for _ in range(MAX_SLOTS)]
 
     def _shutdown(signum, frame):
         stop_event.set()
-        disconnect_event.set()  # unblock reconnect wait
+        for de in disconnect_events:
+            de.set()
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    def _on_disconnect():
-        disconnect_event.set()
-
-    print("Connecting to GameCube controller...")
-    if not conn_mgr.connect():
-        print("Failed to connect. Is the controller plugged in?")
+    # Enumerate and connect all available controllers
+    all_hid = ConnectionManager.enumerate_devices()
+    if not all_hid:
+        print("No GameCube controllers found. Is one plugged in?")
         sys.exit(1)
 
-    mode_label = "Dolphin pipe" if mode == 'dolphin_pipe' else "Xbox 360"
-    print(f"Starting {mode_label} emulation...")
-    try:
-        emu_mgr.start(mode)
-    except Exception as e:
-        print(f"Failed to start emulation: {e}")
-        conn_mgr.disconnect()
+    # Initialize all USB devices
+    usb_devices = ConnectionManager.enumerate_usb_devices()
+    for usb_dev in usb_devices:
+        tmp = ConnectionManager(on_status=lambda msg: None, on_progress=lambda val: None)
+        tmp.initialize_via_usb(usb_device=usb_dev)
+
+    all_paths = {d['path'] for d in all_hid}
+    active_slots: list[dict] = []
+    claimed_paths = set()
+
+    # Build slot -> preferred path mapping from settings
+    slot_preferred: dict[int, bytes] = {}
+    for i in range(MAX_SLOTS):
+        saved = slot_calibrations[i].get('preferred_device_path', '')
+        if saved:
+            pref_bytes = saved.encode('utf-8')
+            if pref_bytes in all_paths:
+                slot_preferred[i] = pref_bytes
+
+    print(f"Found {len(all_hid)} controller(s). Connecting up to {min(MAX_SLOTS, len(all_hid))}...")
+
+    def _connect_slot(i, path):
+        """Helper to connect a single slot to a specific HID path."""
+        cal = slot_calibrations[i]
+        cal_mgr = CalibrationManager(cal)
+        conn_mgr = ConnectionManager(
+            on_status=lambda msg, idx=i: print(f"[slot {idx + 1}] {msg}"),
+            on_progress=lambda val: None,
+        )
+
+        if not conn_mgr.init_hid_device(device_path=path):
+            print(f"[slot {i + 1}] Failed to open HID device")
+            return
+
+        claimed_paths.add(path)
+
+        emu_mgr = EmulationManager(cal_mgr)
+        slot_mode = mode_override if mode_override else cal.get('emulation_mode', mode)
+
+        mode_label = "Dolphin pipe" if slot_mode == 'dolphin_pipe' else "Xbox 360"
+        print(f"[slot {i + 1}] Starting {mode_label} emulation...")
+        try:
+            emu_mgr.start(slot_mode, slot_index=i)
+        except Exception as e:
+            print(f"[slot {i + 1}] Failed to start emulation: {e}")
+            conn_mgr.disconnect()
+            return
+
+        disc_event = disconnect_events[i]
+
+        input_proc = InputProcessor(
+            device_getter=lambda cm=conn_mgr: cm.device,
+            calibration=cal,
+            cal_mgr=cal_mgr,
+            emu_mgr=emu_mgr,
+            on_ui_update=lambda *args: None,
+            on_error=lambda msg, idx=i: print(f"[slot {idx + 1}] {msg}"),
+            on_disconnect=lambda de=disc_event: de.set(),
+        )
+        input_proc.start()
+
+        active_slots.append({
+            'index': i,
+            'cal_mgr': cal_mgr,
+            'conn_mgr': conn_mgr,
+            'emu_mgr': emu_mgr,
+            'input_proc': input_proc,
+            'device_path': path,
+            'disc_event': disc_event,
+        })
+
+    # First pass: assign preferred devices to their slots
+    for i in range(MAX_SLOTS):
+        pref = slot_preferred.get(i)
+        if pref and pref not in claimed_paths:
+            _connect_slot(i, pref)
+
+    # Second pass: fill remaining slots with unclaimed devices
+    for i in range(MAX_SLOTS):
+        if any(s['index'] == i for s in active_slots):
+            continue
+        target = None
+        for d in all_hid:
+            if d['path'] not in claimed_paths:
+                target = d
+                break
+        if target is None:
+            break
+        _connect_slot(i, target['path'])
+
+    if not active_slots:
+        print("Failed to connect any controllers.")
         sys.exit(1)
 
-    input_proc = InputProcessor(
-        device_getter=lambda: conn_mgr.device,
-        calibration=calibration,
-        cal_mgr=cal_mgr,
-        emu_mgr=emu_mgr,
-        on_ui_update=lambda *args: None,
-        on_error=lambda msg: print(f"[error] {msg}"),
-        on_disconnect=_on_disconnect,
-    )
-    input_proc.start()
+    print(f"Headless mode active with {len(active_slots)} controller(s). Press Ctrl+C to stop.")
 
-    print("Headless mode active. Press Ctrl+C to stop.")
-
+    # Monitor for disconnects and reconnect
     while not stop_event.is_set():
-        disconnect_event.wait()
-        disconnect_event.clear()
-
+        # Wait for any disconnect event
+        stop_event.wait(timeout=1.0)
         if stop_event.is_set():
             break
 
-        # Unexpected disconnect — attempt reconnect
-        if conn_mgr.device:
-            try:
-                conn_mgr.device.close()
-            except Exception:
-                pass
-            conn_mgr.device = None
+        for slot_info in active_slots:
+            disc_event = slot_info['disc_event']
+            if not disc_event.is_set():
+                continue
 
-        was_emulating = emu_mgr.is_emulating
-        if emu_mgr.is_emulating:
-            emu_mgr.stop()
+            disc_event.clear()
+            idx = slot_info['index']
+            conn_mgr = slot_info['conn_mgr']
+            emu_mgr = slot_info['emu_mgr']
+            input_proc = slot_info['input_proc']
 
-        print("Controller disconnected — reconnecting...")
+            if conn_mgr.device:
+                try:
+                    conn_mgr.device.close()
+                except Exception:
+                    pass
+                conn_mgr.device = None
 
-        while not stop_event.is_set():
-            if conn_mgr.connect():
-                input_proc.start()
-                print("Reconnected.")
-                if was_emulating:
-                    try:
-                        emu_mgr.start(mode)
-                        print(f"{mode_label} emulation resumed.")
-                    except Exception as e:
-                        print(f"Failed to resume emulation: {e}")
-                break
-            stop_event.wait(timeout=2.0)
+            was_emulating = emu_mgr.is_emulating
+            if emu_mgr.is_emulating:
+                emu_mgr.stop()
+
+            print(f"[slot {idx + 1}] Controller disconnected — reconnecting...")
+
+            # Reconnect loop for this slot
+            reconnected = False
+            while not stop_event.is_set():
+                # Build candidates: runtime path, then saved preferred, then any
+                remembered = slot_info['device_path']
+                saved_pref = slot_calibrations[idx].get('preferred_device_path', '')
+
+                cur_hid = ConnectionManager.enumerate_devices()
+                cur_paths = {d['path'] for d in cur_hid}
+                cur_claimed = set()
+                for other in active_slots:
+                    if other['index'] != idx and other['conn_mgr'].device:
+                        if other['conn_mgr'].device_path:
+                            cur_claimed.add(other['conn_mgr'].device_path)
+
+                candidates = []
+                if remembered:
+                    candidates.append(remembered)
+                if saved_pref:
+                    pref_bytes = saved_pref.encode('utf-8')
+                    if pref_bytes not in candidates:
+                        candidates.append(pref_bytes)
+
+                target_path = None
+                for c in candidates:
+                    if c in cur_paths and c not in cur_claimed:
+                        target_path = c
+                        break
+
+                if target_path is None:
+                    for d in cur_hid:
+                        if d['path'] not in cur_claimed:
+                            target_path = d['path']
+                            break
+
+                if target_path:
+                    # Re-init USB
+                    usb_devs = ConnectionManager.enumerate_usb_devices()
+                    for usb_dev in usb_devs:
+                        conn_mgr.initialize_via_usb(usb_device=usb_dev)
+
+                    if conn_mgr.init_hid_device(device_path=target_path):
+                        slot_info['device_path'] = target_path
+                        input_proc.start()
+                        print(f"[slot {idx + 1}] Reconnected.")
+                        if was_emulating:
+                            slot_mode = mode_override if mode_override else \
+                                slot_calibrations[idx].get('emulation_mode', mode)
+                            try:
+                                emu_mgr.start(slot_mode, slot_index=idx)
+                                mode_label = "Dolphin pipe" if slot_mode == 'dolphin_pipe' \
+                                    else "Xbox 360"
+                                print(f"[slot {idx + 1}] {mode_label} emulation resumed.")
+                            except Exception as e:
+                                print(f"[slot {idx + 1}] Failed to resume emulation: {e}")
+                        reconnected = True
+                        break
+
+                stop_event.wait(timeout=2.0)
 
     print("\nShutting down...")
-    input_proc.stop()
-    emu_mgr.stop()
-    conn_mgr.disconnect()
+    for slot_info in active_slots:
+        slot_info['input_proc'].stop()
+        slot_info['emu_mgr'].stop()
+        slot_info['conn_mgr'].disconnect()
     print("Done.")
 
 

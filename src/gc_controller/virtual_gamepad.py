@@ -492,10 +492,11 @@ def get_emulation_unavailable_reason(mode: str = 'xbox360') -> str:
         return f"Xbox 360 emulation is not supported on {sys.platform}."
 
 
-def create_gamepad(mode: str = 'xbox360') -> VirtualGamepad:
+def create_gamepad(mode: str = 'xbox360', slot_index: int = 0) -> VirtualGamepad:
     """Factory: create the appropriate VirtualGamepad for the current platform/mode."""
     if mode == 'dolphin_pipe':
-        return DolphinPipeGamepad()
+        pipe_name = f'gc_controller_{slot_index + 1}'
+        return DolphinPipeGamepad(pipe_name=pipe_name)
 
     # Xbox 360 mode
     if sys.platform == "win32":

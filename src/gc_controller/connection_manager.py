@@ -2,10 +2,11 @@
 Connection Manager
 
 Handles USB initialization and HID device connection for the GameCube controller.
+Supports multi-device enumeration and path-targeted open for multi-controller setups.
 """
 
 import sys
-from typing import Optional, Callable
+from typing import Optional, Callable, List
 
 import hid
 import usb.core
@@ -23,14 +24,30 @@ class ConnectionManager:
         self._on_status = on_status
         self._on_progress = on_progress
         self.device: Optional[hid.device] = None
+        self.device_path: Optional[bytes] = None
 
-    def initialize_via_usb(self) -> bool:
-        """Initialize controller via USB."""
+    @staticmethod
+    def enumerate_devices() -> List[dict]:
+        """Return a list of HID device info dicts for all connected GC controllers."""
+        return hid.enumerate(VENDOR_ID, PRODUCT_ID)
+
+    @staticmethod
+    def enumerate_usb_devices() -> list:
+        """Return a list of all USB device objects matching the GC controller VID/PID."""
+        devices = usb.core.find(find_all=True, idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+        return list(devices) if devices else []
+
+    def initialize_via_usb(self, usb_device=None) -> bool:
+        """Initialize controller via USB.
+
+        If usb_device is provided, use it directly instead of scanning.
+        """
         try:
             self._on_status("Looking for device...")
             self._on_progress(10)
 
-            dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+            dev = usb_device if usb_device is not None else usb.core.find(
+                idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
             if dev is None:
                 self._on_status("Device not found")
                 return False
@@ -79,15 +96,23 @@ class ConnectionManager:
             self._on_status(f"USB initialization failed: {e}")
             return False
 
-    def init_hid_device(self) -> bool:
-        """Initialize HID connection."""
+    def init_hid_device(self, device_path: Optional[bytes] = None) -> bool:
+        """Initialize HID connection.
+
+        If device_path is provided, open that specific device by path.
+        Otherwise, open the first matching VID/PID device.
+        """
         try:
             self._on_status("Connecting via HID...")
 
             self.device = hid.device()
-            self.device.open(VENDOR_ID, PRODUCT_ID)
+            if device_path:
+                self.device.open_path(device_path)
+            else:
+                self.device.open(VENDOR_ID, PRODUCT_ID)
 
             if self.device:
+                self.device_path = device_path
                 self._on_status("Connected via HID")
                 self._on_progress(100)
                 return True
@@ -99,11 +124,14 @@ class ConnectionManager:
             self._on_status(f"HID connection failed: {e}")
             return False
 
-    def connect(self) -> bool:
-        """Full connection sequence: USB init then HID."""
-        if not self.initialize_via_usb():
+    def connect(self, usb_device=None, device_path: Optional[bytes] = None) -> bool:
+        """Full connection sequence: USB init then HID.
+
+        Optionally target a specific USB device and/or HID device path.
+        """
+        if not self.initialize_via_usb(usb_device=usb_device):
             return False
-        return self.init_hid_device()
+        return self.init_hid_device(device_path=device_path)
 
     def disconnect(self):
         """Close and release the HID device."""
@@ -113,3 +141,4 @@ class ConnectionManager:
             except Exception:
                 pass
             self.device = None
+            self.device_path = None

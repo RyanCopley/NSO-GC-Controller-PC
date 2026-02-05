@@ -24,10 +24,10 @@ class EmulationManager:
         self.is_emulating = False
         self.mode: str = 'xbox360'
 
-    def start(self, mode: str = 'xbox360') -> None:
+    def start(self, mode: str = 'xbox360', slot_index: int = 0) -> None:
         """Create the virtual gamepad and begin emulation. Raises on failure."""
         self.mode = mode
-        self.gamepad = create_gamepad(mode)
+        self.gamepad = create_gamepad(mode, slot_index=slot_index)
         self.is_emulating = True
 
     def stop(self) -> None:
