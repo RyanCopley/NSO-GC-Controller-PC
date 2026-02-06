@@ -17,12 +17,13 @@ from enum import Enum, auto
 
 
 def _setup_vgamepad_dll_path():
-    """Pre-configure DLL search paths for vgamepad in frozen PyInstaller builds.
+    """Pre-load ViGEmClient.dll for vgamepad in frozen PyInstaller builds.
 
-    Python 3.8+ changed DLL loading on Windows to use secure search flags
-    that don't include the DLL's own directory when resolving dependencies.
-    This must run before 'import vgamepad' so ctypes.CDLL can find
-    ViGEmClient.dll and all its transitive dependencies.
+    Python 3.8+ changed DLL loading on Windows to use secure search flags.
+    We pre-load the DLL using legacy flags (winmode=0) so that when vgamepad
+    later calls CDLL(path), Windows finds it already in the process and
+    reuses the handle.  Also excludes ViGEmClient.dll from UPX compression
+    via the .spec file to avoid PE header corruption.
     """
     if sys.platform != "win32":
         return
@@ -34,16 +35,29 @@ def _setup_vgamepad_dll_path():
         return
 
     import platform
+    import ctypes
     arch = "x64" if platform.architecture()[0] == "64bit" else "x86"
     dll_dir = os.path.join(meipass, 'vgamepad', 'win', 'vigem', 'client', arch)
-    if os.path.isdir(dll_dir):
-        try:
-            os.add_dll_directory(dll_dir)
-        except (OSError, AttributeError):
-            # add_dll_directory requires Python 3.8+ and may fail on some configs
-            pass
-        # Also prepend to PATH as a fallback for older ctypes behavior
-        os.environ['PATH'] = dll_dir + os.pathsep + os.environ.get('PATH', '')
+    dll_path = os.path.join(dll_dir, 'ViGEmClient.dll')
+
+    if not os.path.isfile(dll_path):
+        return
+
+    # Add DLL directory to search path
+    try:
+        os.add_dll_directory(dll_dir)
+    except (OSError, AttributeError):
+        pass
+    os.environ['PATH'] = dll_dir + os.pathsep + os.environ.get('PATH', '')
+
+    # Pre-load the DLL with legacy search behavior (winmode=0 uses
+    # LoadLibraryW instead of LoadLibraryExW with restrictive flags).
+    # Once loaded, subsequent CDLL() calls for the same path will reuse
+    # the already-loaded module handle.
+    try:
+        ctypes.WinDLL(dll_path, winmode=0)
+    except Exception:
+        pass
 
 
 _setup_vgamepad_dll_path()
