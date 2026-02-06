@@ -568,14 +568,15 @@ def is_emulation_available(mode: str = 'xbox360') -> bool:
     if sys.platform == "win32":
         try:
             import vgamepad
+            vgamepad.VX360Gamepad  # verify class is accessible
             return True
-        except ImportError:
+        except Exception:
             return False
     elif sys.platform == "linux":
         try:
             import evdev
             return os.access('/dev/uinput', os.W_OK)
-        except ImportError:
+        except Exception:
             return False
     else:
         return False

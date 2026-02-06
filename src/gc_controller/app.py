@@ -837,6 +837,14 @@ class GCControllerEnabler:
 
     def toggle_emulation(self, slot_index: int):
         """Start or stop controller emulation for a specific slot."""
+        try:
+            self._toggle_emulation_inner(slot_index)
+        except Exception as e:
+            self._messagebox.showerror(
+                "Emulation Error", f"Unexpected error: {e}")
+
+    def _toggle_emulation_inner(self, slot_index: int):
+        """Inner implementation of toggle_emulation."""
         slot = self.slots[slot_index]
         sui = self.ui.slots[slot_index]
 
