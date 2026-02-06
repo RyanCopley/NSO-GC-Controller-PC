@@ -589,10 +589,32 @@ def get_emulation_unavailable_reason(mode: str = 'xbox360') -> str:
 
     # Xbox 360 mode
     if sys.platform == "win32":
+        # Diagnose which component is missing
+        try:
+            import vgamepad
+        except ImportError:
+            return (
+                "Xbox 360 emulation requires the vgamepad Python package.\n"
+                "Install with: pip install vgamepad"
+            )
+        except OSError:
+            return (
+                "The vgamepad package is installed but its DLL failed to load.\n"
+                "Try reinstalling: pip install --force-reinstall vgamepad"
+            )
+        except Exception:
+            return (
+                "Xbox 360 emulation requires vgamepad and ViGEmBus driver.\n"
+                "Install vgamepad: pip install vgamepad\n"
+                "Install ViGEmBus: https://github.com/nefarius/ViGEmBus/releases"
+            )
+
+        # vgamepad imported OK — the problem is likely ViGEmBus driver
         return (
-            "Xbox 360 emulation requires vgamepad and ViGEmBus driver.\n"
-            "Install vgamepad: pip install vgamepad\n"
-            "Install ViGEmBus: https://github.com/nefarius/ViGEmBus"
+            "Xbox 360 emulation requires the ViGEmBus driver.\n\n"
+            "Download and install it from:\n"
+            "https://github.com/nefarius/ViGEmBus/releases\n\n"
+            "After installing, restart your computer."
         )
     elif sys.platform == "linux":
         return (
