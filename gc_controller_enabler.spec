@@ -88,6 +88,17 @@ elif sys.platform == "darwin":
 elif sys.platform == "linux":
     hiddenimports += [
         'evdev',
+        'bumble',
+        'bumble.device',
+        'bumble.hci',
+        'bumble.pairing',
+        'bumble.transport',
+        'bumble.smp',
+        'bumble.gatt',
+        'gc_controller.ble',
+        'gc_controller.ble.bumble_backend',
+        'gc_controller.ble.ble_subprocess',
+        'gc_controller.ble.sw2_protocol',
     ]
 
 a = Analysis(

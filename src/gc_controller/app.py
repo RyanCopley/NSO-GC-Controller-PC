@@ -239,23 +239,32 @@ class GCControllerEnabler:
 
     def _start_ble_subprocess(self):
         """Start the BLE subprocess. Uses pkexec on Linux, direct spawn on macOS/Windows."""
+        frozen = getattr(sys, 'frozen', False)
         if sys.platform == 'darwin' or sys.platform == 'win32':
-            script_path = os.path.join(
-                os.path.dirname(__file__), 'ble', 'bleak_subprocess.py')
-            python_path = os.pathsep.join(p for p in sys.path if p)
+            if frozen:
+                cmd = [sys.executable, '--bleak-subprocess']
+            else:
+                script_path = os.path.join(
+                    os.path.dirname(__file__), 'ble', 'bleak_subprocess.py')
+                python_path = os.pathsep.join(p for p in sys.path if p)
+                cmd = [sys.executable, script_path, python_path]
             self._ble_subprocess = subprocess.Popen(
-                [sys.executable, script_path, python_path],
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 text=True,
                 bufsize=1,
             )
         else:
-            script_path = os.path.join(
-                os.path.dirname(__file__), 'ble', 'ble_subprocess.py')
-            python_path = os.pathsep.join(p for p in sys.path if p)
+            if frozen:
+                cmd = ['pkexec', sys.executable, '--ble-subprocess']
+            else:
+                script_path = os.path.join(
+                    os.path.dirname(__file__), 'ble', 'ble_subprocess.py')
+                python_path = os.pathsep.join(p for p in sys.path if p)
+                cmd = ['pkexec', sys.executable, script_path, python_path]
             self._ble_subprocess = subprocess.Popen(
-                ['pkexec', sys.executable, script_path, python_path],
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 text=True,
@@ -1037,23 +1046,32 @@ class _BleHeadlessManager:
 
     def start_subprocess(self):
         """Start the BLE subprocess. Uses pkexec on Linux, direct spawn on macOS/Windows."""
+        frozen = getattr(sys, 'frozen', False)
         if sys.platform == 'darwin' or sys.platform == 'win32':
-            script_path = os.path.join(
-                os.path.dirname(__file__), 'ble', 'bleak_subprocess.py')
-            python_path = os.pathsep.join(p for p in sys.path if p)
+            if frozen:
+                cmd = [sys.executable, '--bleak-subprocess']
+            else:
+                script_path = os.path.join(
+                    os.path.dirname(__file__), 'ble', 'bleak_subprocess.py')
+                python_path = os.pathsep.join(p for p in sys.path if p)
+                cmd = [sys.executable, script_path, python_path]
             self._subprocess = subprocess.Popen(
-                [sys.executable, script_path, python_path],
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 text=True,
                 bufsize=1,
             )
         else:
-            script_path = os.path.join(
-                os.path.dirname(__file__), 'ble', 'ble_subprocess.py')
-            python_path = os.pathsep.join(p for p in sys.path if p)
+            if frozen:
+                cmd = ['pkexec', sys.executable, '--ble-subprocess']
+            else:
+                script_path = os.path.join(
+                    os.path.dirname(__file__), 'ble', 'ble_subprocess.py')
+                python_path = os.pathsep.join(p for p in sys.path if p)
+                cmd = ['pkexec', sys.executable, script_path, python_path]
             self._subprocess = subprocess.Popen(
-                ['pkexec', sys.executable, script_path, python_path],
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 text=True,
