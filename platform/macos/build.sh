@@ -1,4 +1,6 @@
 #!/bin/bash
+set -e
+
 echo "Building GameCube Controller Enabler for macOS..."
 
 # Check if virtual environment exists
@@ -22,10 +24,6 @@ echo "Building executable..."
 pyinstaller --onefile \
     --windowed \
     --name "GC-Controller-Enabler" \
-    --icon=images/controller.png \
-    --add-data "images/controller.png:." \
-    --add-data "images/stick_left.png:." \
-    --add-data "images/stick_right.png:." \
     --paths src \
     --hidden-import gc_controller.virtual_gamepad \
     --hidden-import gc_controller.controller_constants \
@@ -35,6 +33,11 @@ pyinstaller --onefile \
     --hidden-import gc_controller.emulation_manager \
     --hidden-import gc_controller.controller_ui \
     --hidden-import gc_controller.input_processor \
+    --hidden-import gc_controller.ble \
+    --hidden-import gc_controller.ble.bleak_backend \
+    --hidden-import gc_controller.ble.bleak_subprocess \
+    --hidden-import gc_controller.ble.sw2_protocol \
+    --hidden-import bleak \
     --distpath dist/macos \
     src/gc_controller/__main__.py
 

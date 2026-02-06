@@ -238,18 +238,29 @@ class GCControllerEnabler:
     # ── BLE subprocess helpers ────────────────────────────────────────
 
     def _start_ble_subprocess(self):
-        """Start the privileged BLE subprocess via pkexec."""
-        script_path = os.path.join(
-            os.path.dirname(__file__), 'ble', 'ble_subprocess.py')
-        python_path = os.pathsep.join(p for p in sys.path if p)
-
-        self._ble_subprocess = subprocess.Popen(
-            ['pkexec', sys.executable, script_path, python_path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        """Start the BLE subprocess. Uses pkexec on Linux, direct spawn on macOS."""
+        if sys.platform == 'darwin':
+            script_path = os.path.join(
+                os.path.dirname(__file__), 'ble', 'bleak_subprocess.py')
+            python_path = os.pathsep.join(p for p in sys.path if p)
+            self._ble_subprocess = subprocess.Popen(
+                [sys.executable, script_path, python_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        else:
+            script_path = os.path.join(
+                os.path.dirname(__file__), 'ble', 'ble_subprocess.py')
+            python_path = os.pathsep.join(p for p in sys.path if p)
+            self._ble_subprocess = subprocess.Popen(
+                ['pkexec', sys.executable, script_path, python_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
 
         self._ble_reader_thread = threading.Thread(
             target=self._ble_event_reader, daemon=True)
@@ -370,14 +381,15 @@ class GCControllerEnabler:
     def _init_ble(self) -> bool:
         """Lazy-initialize BLE subsystem on first pair attempt.
 
-        Spawns a privileged subprocess via pkexec that handles all BLE
-        operations (raw HCI access requires elevated privileges on Linux).
+        On Linux, spawns a privileged subprocess via pkexec (raw HCI access
+        requires elevated privileges). On macOS, spawns a regular subprocess
+        using Bleak/CoreBluetooth (no elevated privileges needed).
         Returns True on success.
         """
         if self._ble_initialized:
             return True
 
-        if not shutil.which('pkexec'):
+        if sys.platform != 'darwin' and not shutil.which('pkexec'):
             self._messagebox.showerror(
                 "BLE Error",
                 "pkexec is required for Bluetooth LE.\n\n"
@@ -1024,18 +1036,29 @@ class _BleHeadlessManager:
         self._init_result = None
 
     def start_subprocess(self):
-        """Start the privileged BLE subprocess via pkexec."""
-        script_path = os.path.join(
-            os.path.dirname(__file__), 'ble', 'ble_subprocess.py')
-        python_path = os.pathsep.join(p for p in sys.path if p)
-
-        self._subprocess = subprocess.Popen(
-            ['pkexec', sys.executable, script_path, python_path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        """Start the BLE subprocess. Uses pkexec on Linux, direct spawn on macOS."""
+        if sys.platform == 'darwin':
+            script_path = os.path.join(
+                os.path.dirname(__file__), 'ble', 'bleak_subprocess.py')
+            python_path = os.pathsep.join(p for p in sys.path if p)
+            self._subprocess = subprocess.Popen(
+                [sys.executable, script_path, python_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        else:
+            script_path = os.path.join(
+                os.path.dirname(__file__), 'ble', 'ble_subprocess.py')
+            python_path = os.pathsep.join(p for p in sys.path if p)
+            self._subprocess = subprocess.Popen(
+                ['pkexec', sys.executable, script_path, python_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
 
     def send_cmd(self, cmd: dict):
         """Send a JSON-line command to the BLE subprocess."""
@@ -1067,12 +1090,13 @@ class _BleHeadlessManager:
 
         The reader thread must be running before we wait for init events,
         so on_data and on_event callbacks are required upfront.
+        On macOS, pkexec is not needed (CoreBluetooth works in userspace).
         Returns True on success, prints errors to stdout.
         """
         if self._initialized:
             return True
 
-        if not shutil.which('pkexec'):
+        if sys.platform != 'darwin' and not shutil.which('pkexec'):
             print("BLE Error: pkexec is required for Bluetooth LE.")
             print("Install with: sudo apt install policykit-1")
             return False

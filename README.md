@@ -7,7 +7,7 @@ A cross-platform Python/Tkinter tool that connects Nintendo Switch Online GameCu
 ## Features
 
 - **Multi-controller support** — connect up to 4 controllers simultaneously, each with independent calibration and settings
-- **USB and Bluetooth** — connect via USB HID or Bluetooth Low Energy (BLE on Linux)
+- **USB and Bluetooth** — connect via USB HID or Bluetooth Low Energy (BLE on Linux and macOS)
 - **Xbox 360 emulation** — virtual gamepad via vgamepad on Windows and evdev/uinput on Linux
 - **Dolphin pipe mode** — named FIFO pipes for direct Dolphin emulator integration (Linux/macOS)
 - **Stick calibration** — octagon-based deadzone detection across 8 directional sectors
@@ -21,7 +21,7 @@ A cross-platform Python/Tkinter tool that connects Nintendo Switch Online GameCu
 | Feature | Windows | Linux | macOS |
 |---|---|---|---|
 | USB connection | Yes | Yes | Yes |
-| Bluetooth (BLE) | — | Yes | — |
+| Bluetooth (BLE) | — | Yes | Yes |
 | Xbox 360 emulation | Yes (ViGEmBus) | Yes (evdev/uinput) | — |
 | Dolphin pipe mode | — | Yes | Yes |
 
@@ -55,6 +55,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 ### macOS
 - Install libusb: `brew install libusb`
+- **For Bluetooth**: install the [Bleak](https://github.com/hbldh/bleak) BLE library (`pip install bleak`). No elevated privileges needed — CoreBluetooth runs in userspace.
 - Xbox 360 emulation is not available on macOS; use Dolphin pipe mode instead
 
 ## Usage
@@ -127,9 +128,11 @@ src/gc_controller/
   virtual_gamepad.py        Cross-platform gamepad abstraction
   ble/
     __init__.py             BLE availability detection and utilities
-    bumble_backend.py       Bumble HCI transport and GATT client
+    bumble_backend.py       Bumble HCI transport and GATT client (Linux)
+    bleak_backend.py        Bleak/CoreBluetooth BLE backend (macOS)
     sw2_protocol.py         Switch controller BLE protocol (pairing, input reports)
-    ble_subprocess.py       Privileged subprocess runner for BLE operations
+    ble_subprocess.py       Privileged subprocess runner for BLE operations (Linux)
+    bleak_subprocess.py     BLE subprocess for macOS (no elevated privileges)
     ble_event_loop.py       Asyncio integration helper
 pyproject.toml              Project metadata and dependencies
 GC-Controller-Enabler.spec  PyInstaller spec file
@@ -163,6 +166,12 @@ platform/
 - The BLE subprocess needs elevated privileges and will prompt via `pkexec`
 - BlueZ is temporarily stopped while BLE is active (Bumble takes direct HCI control)
 - If Bluetooth fails to initialize, ensure your HCI adapter is available (`hciconfig`)
+
+### Bluetooth Issues (macOS)
+- BLE requires the Bleak library: `pip install bleak`
+- No elevated privileges needed — CoreBluetooth handles pairing and encryption automatically
+- Put the controller in pairing mode (hold SYNC) before clicking **Pair Controller**
+- If the controller isn't found, ensure Bluetooth is enabled in System Settings
 
 ### Permission Errors
 - **Windows**: HID access may require administrator privileges

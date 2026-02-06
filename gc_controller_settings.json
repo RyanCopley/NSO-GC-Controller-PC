@@ -22,8 +22,8 @@
       "stick_right_center_y": 2079.5,
       "stick_right_range_y": 1102.5,
       "preferred_device_path": "1-1:1.0",
-      "connection_mode": "ble",
-      "preferred_ble_address": "3C:A9:AB:60:24:BF/P",
+      "connection_mode": "usb",
+      "preferred_ble_address": "",
       "stick_left_octagon": [
         [
           1.0,

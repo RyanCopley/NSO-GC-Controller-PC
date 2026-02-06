@@ -14,12 +14,17 @@ def run_command(cmd, shell=True):
     """Run a command and return success status"""
     try:
         result = subprocess.run(cmd, shell=shell, check=True, capture_output=True, text=True)
-        print(result.stdout)
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr)
         return True
     except subprocess.CalledProcessError as e:
         print(f"Error: {e}")
-        print(f"Output: {e.stdout}")
-        print(f"Error: {e.stderr}")
+        if e.stdout:
+            print(f"Output: {e.stdout}")
+        if e.stderr:
+            print(f"Error: {e.stderr}")
         return False
 
 def build_executable():

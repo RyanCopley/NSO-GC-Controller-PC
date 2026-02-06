@@ -5,6 +5,7 @@ Platform-independent Switch 2 BLE initialization sequence for NSO GameCube contr
 Faithfully ported from the working PoC (tools/ble_bumble_connect.py), which was derived
 from BlueRetro (darthcloud) and ndeadly's switch2_input_viewer.py.
 """
+from __future__ import annotations
 
 import asyncio
 import struct
@@ -99,9 +100,125 @@ def translate_ble_to_usb(ble_data: bytes) -> bytes:
 
     return bytes(buf)
 
-from bumble.device import Peer, Device
-from bumble.gatt import Characteristic
-from bumble.hci import HCI_LE_Enable_Encryption_Command
+
+def translate_ble_native_to_usb(ble_data: bytes) -> bytes:
+    """Translate native NSO BLE input report to 64-byte USB HID format.
+
+    On macOS (CoreBluetooth), the controller sends native NSO format — NOT
+    the BlueRetro uint32 bitmask format.  The layout depends on report length:
+
+    63-byte "discovered" format (most common on macOS):
+        [2]     buttons byte 0: B=0x01 A=0x02 Y=0x04 X=0x08 R=0x10 Z=0x20 Start=0x40
+        [3]     buttons byte 1: DDown=0x01 DRight=0x02 DLeft=0x04 DUp=0x08 L=0x10 ZL=0x20
+        [4]     buttons byte 2: Home=0x01 Capture=0x02
+        [5-10]  stick axes (packed 12-bit: LX, LY, RX, RY)
+        [12]    left trigger
+        [13]    right trigger
+
+    Shorter "NSO stripped" format (macOS may strip report ID):
+        If byte 0 != 0x30: same offsets as above (timer, battery, buttons 2-4, sticks 5-10)
+        If byte 0 == 0x30: full report with buttons at 3-5, sticks at 6-11
+
+    USB format (from controller_constants.py):
+        [0]     report ID (0x00)
+        [3]     buttons byte 0: B=0x01 A=0x02 Y=0x04 X=0x08 R=0x10 Z=0x20 Start=0x40
+        [4]     buttons byte 1: DDown=0x01 DRight=0x02 DLeft=0x04 DUp=0x08 L=0x10 ZL=0x20
+        [5]     buttons byte 2: Home=0x01 Capture=0x02 GR=0x04 GL=0x08 Chat=0x10
+        [6-11]  stick axes (same packed 12-bit format)
+        [13]    left trigger
+        [14]    right trigger
+    """
+    if len(ble_data) < 11:
+        return b'\x00' * 64
+
+    buf = bytearray(64)
+
+    if len(ble_data) == 63:
+        # 63-byte "discovered" format — button bytes map directly to USB layout
+        buf[3] = ble_data[2]   # B, A, Y, X, R, Z, Start
+        buf[4] = ble_data[3]   # DDown, DRight, DLeft, DUp, L, ZL
+        buf[5] = ble_data[4]   # Home, Capture
+        buf[6:12] = ble_data[5:11]  # sticks
+        if len(ble_data) > 13:
+            buf[13] = ble_data[12]  # left trigger
+            buf[14] = ble_data[13]  # right trigger
+    elif ble_data[0] == 0x30:
+        # Full NSO report with report ID 0x30: buttons at 3,4,5; sticks at 6-11
+        # Nintendo standard: b3=Y,X,B,A,_,_,R,ZR; b4=...; b5=Dpad,L,ZL
+        # Remap to USB/GC order: b3=B,A,Y,X,R,Z,Start
+        b3_nso, b4_nso, b5_nso = ble_data[3], ble_data[4], ble_data[5]
+        b3 = 0
+        if b3_nso & 0x04: b3 |= 0x01  # B
+        if b3_nso & 0x08: b3 |= 0x02  # A
+        if b3_nso & 0x01: b3 |= 0x04  # Y
+        if b3_nso & 0x02: b3 |= 0x08  # X
+        if b3_nso & 0x10: b3 |= 0x10  # R (same bit)
+        if b3_nso & 0x20: b3 |= 0x20  # ZR -> Z
+        if b4_nso & 0x02: b3 |= 0x40  # Plus -> Start
+        buf[3] = b3
+        b4 = 0
+        if b5_nso & 0x01: b4 |= 0x01  # DDown
+        if b5_nso & 0x04: b4 |= 0x02  # DRight
+        if b5_nso & 0x08: b4 |= 0x04  # DLeft
+        if b5_nso & 0x02: b4 |= 0x08  # DUp
+        if b5_nso & 0x40: b4 |= 0x10  # L
+        if b5_nso & 0x80: b4 |= 0x20  # ZL
+        buf[4] = b4
+        b5 = 0
+        if b4_nso & 0x10: b5 |= 0x01  # Home
+        if b4_nso & 0x20: b5 |= 0x02  # Capture
+        buf[5] = b5
+        buf[6:12] = ble_data[6:12]  # sticks
+        if len(ble_data) > 15:
+            buf[13] = ble_data[14]  # left trigger
+            buf[14] = ble_data[15]  # right trigger
+    else:
+        # Stripped NSO report (no 0x30 prefix): buttons at 2,3,4; sticks at 5-10
+        # Same remap as above
+        b3_nso, b4_nso, b5_nso = ble_data[2], ble_data[3], ble_data[4]
+        b3 = 0
+        if b3_nso & 0x04: b3 |= 0x01  # B
+        if b3_nso & 0x08: b3 |= 0x02  # A
+        if b3_nso & 0x01: b3 |= 0x04  # Y
+        if b3_nso & 0x02: b3 |= 0x08  # X
+        if b3_nso & 0x10: b3 |= 0x10  # R
+        if b3_nso & 0x20: b3 |= 0x20  # ZR -> Z
+        if b4_nso & 0x02: b3 |= 0x40  # Plus -> Start
+        buf[3] = b3
+        b4 = 0
+        if b5_nso & 0x01: b4 |= 0x01  # DDown
+        if b5_nso & 0x04: b4 |= 0x02  # DRight
+        if b5_nso & 0x08: b4 |= 0x04  # DLeft
+        if b5_nso & 0x02: b4 |= 0x08  # DUp
+        if b5_nso & 0x40: b4 |= 0x10  # L
+        if b5_nso & 0x80: b4 |= 0x20  # ZL
+        buf[4] = b4
+        b5 = 0
+        if b4_nso & 0x10: b5 |= 0x01  # Home
+        if b4_nso & 0x20: b5 |= 0x02  # Capture
+        buf[5] = b5
+        buf[6:12] = ble_data[5:11]  # sticks
+        if len(ble_data) > 14:
+            buf[13] = ble_data[13]  # left trigger
+            buf[14] = ble_data[14]  # right trigger
+
+    # If triggers are zero, synthesize from digital buttons (ZL/Z)
+    if buf[13] == 0 and buf[14] == 0:
+        if buf[4] & 0x20:  # ZL
+            buf[13] = 255
+        if buf[3] & 0x20:  # Z
+            buf[14] = 255
+
+    return bytes(buf)
+
+
+try:
+    from bumble.device import Peer, Device
+    from bumble.gatt import Characteristic
+    from bumble.hci import HCI_LE_Enable_Encryption_Command
+    _BUMBLE_AVAILABLE = True
+except ImportError:
+    _BUMBLE_AVAILABLE = False
 
 # --- Fixed ATT Handles ---
 H_SVC1_ENABLE = 0x0005

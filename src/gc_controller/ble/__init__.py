@@ -11,25 +11,37 @@ import sys
 
 
 def is_ble_available() -> bool:
-    """Check if BLE support is available (Linux + bumble importable)."""
-    if sys.platform != 'linux':
-        return False
-    try:
-        import bumble  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    """Check if BLE support is available (Linux + bumble, or macOS + bleak)."""
+    if sys.platform == 'linux':
+        try:
+            import bumble  # noqa: F401
+            return True
+        except ImportError:
+            return False
+    elif sys.platform == 'darwin':
+        try:
+            import bleak  # noqa: F401
+            return True
+        except ImportError:
+            return False
+    return False
 
 
 def get_ble_unavailable_reason() -> str:
     """Return a human-readable reason why BLE is not available."""
-    if sys.platform != 'linux':
-        return "BLE support is only available on Linux."
-    try:
-        import bumble  # noqa: F401
-    except ImportError:
-        return "The 'bumble' package is not installed. Install with: pip install bumble"
-    return ""
+    if sys.platform == 'linux':
+        try:
+            import bumble  # noqa: F401
+        except ImportError:
+            return "The 'bumble' package is not installed. Install with: pip install bumble"
+        return ""
+    elif sys.platform == 'darwin':
+        try:
+            import bleak  # noqa: F401
+        except ImportError:
+            return "The 'bleak' package is not installed. Install with: pip install bleak"
+        return ""
+    return "BLE support is only available on Linux and macOS."
 
 
 def stop_bluez() -> bool:
