@@ -15,13 +15,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
+      # Use system Python (NOT actions/setup-python) because Ubuntu's Python
+      # is compiled with libbluetooth-dev, providing socket.AF_BLUETOOTH
+      # which bumble's HCI socket transport requires.
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev libbluetooth-dev python3-venv
+
+      - name: Set up Python venv
+        run: |
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> $GITHUB_PATH
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
