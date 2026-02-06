@@ -16,6 +16,39 @@ from abc import ABC, abstractmethod
 from enum import Enum, auto
 
 
+def _setup_vgamepad_dll_path():
+    """Pre-configure DLL search paths for vgamepad in frozen PyInstaller builds.
+
+    Python 3.8+ changed DLL loading on Windows to use secure search flags
+    that don't include the DLL's own directory when resolving dependencies.
+    This must run before 'import vgamepad' so ctypes.CDLL can find
+    ViGEmClient.dll and all its transitive dependencies.
+    """
+    if sys.platform != "win32":
+        return
+    if not getattr(sys, 'frozen', False):
+        return
+
+    meipass = getattr(sys, '_MEIPASS', None)
+    if not meipass:
+        return
+
+    import platform
+    arch = "x64" if platform.architecture()[0] == "64bit" else "x86"
+    dll_dir = os.path.join(meipass, 'vgamepad', 'win', 'vigem', 'client', arch)
+    if os.path.isdir(dll_dir):
+        try:
+            os.add_dll_directory(dll_dir)
+        except (OSError, AttributeError):
+            # add_dll_directory requires Python 3.8+ and may fail on some configs
+            pass
+        # Also prepend to PATH as a fallback for older ctypes behavior
+        os.environ['PATH'] = dll_dir + os.pathsep + os.environ.get('PATH', '')
+
+
+_setup_vgamepad_dll_path()
+
+
 class GamepadButton(Enum):
     """Platform-independent button constants for Xbox 360 controller."""
     A = auto()
