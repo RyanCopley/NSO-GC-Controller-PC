@@ -148,8 +148,6 @@ class GCControllerEnabler:
             self.disconnect_controller(slot_index)
             return
 
-        sui.progress['value'] = 0
-
         # Enumerate available HID devices
         all_hid = ConnectionManager.enumerate_devices()
 
@@ -206,6 +204,7 @@ class GCControllerEnabler:
         sui.emulate_btn.config(state='normal')
         self.ui.update_tab_status(slot_index, connected=True, emulating=False)
         self.refresh_devices()
+        self.toggle_emulation(slot_index)
 
     def disconnect_controller(self, slot_index: int):
         """Disconnect from controller on a specific slot."""
@@ -225,7 +224,6 @@ class GCControllerEnabler:
         sui.connect_btn.config(text="Connect")
         sui.emulate_btn.config(state='disabled')
         sui.emulate_btn.config(text="Start Emulation")
-        sui.progress['value'] = 0
         self.ui.update_status(slot_index, "Disconnected")
         self.ui.reset_slot_ui(slot_index)
         self.ui.update_tab_status(slot_index, connected=False, emulating=False)
@@ -375,6 +373,7 @@ class GCControllerEnabler:
             self.ui.update_ble_status(slot_index, f"Connected: {mac}")
             self.ui.update_status(slot_index, "Connected via BLE")
             self.ui.update_tab_status(slot_index, connected=True, emulating=False)
+            self.toggle_emulation(slot_index)
         else:
             if sui.pair_btn:
                 sui.pair_btn.config(state='normal')
@@ -410,8 +409,6 @@ class GCControllerEnabler:
         if sui.pair_btn:
             sui.pair_btn.config(text="Pair Controller", state='normal')
         sui.emulate_btn.config(state='disabled', text="Start Emulation")
-        sui.progress['value'] = 0
-        self.ui.update_ble_status(slot_index, "")
         self.ui.update_status(slot_index, "Disconnected")
         self.ui.reset_slot_ui(slot_index)
         self.ui.update_tab_status(slot_index, connected=False, emulating=False)
@@ -617,7 +614,6 @@ class GCControllerEnabler:
         self.ui.update_status(slot_index, "Controller disconnected — reconnecting...")
         sui.connect_btn.config(text="Connect")
         sui.emulate_btn.config(state='disabled')
-        sui.progress['value'] = 0
         self.ui.update_tab_status(slot_index, connected=False, emulating=False)
 
         self._attempt_reconnect(slot_index)
@@ -687,7 +683,6 @@ class GCControllerEnabler:
 
         # Failed — retry after a delay
         self.ui.update_status(slot_index, "Controller disconnected — reconnecting...")
-        sui.progress['value'] = 0
         self.root.after(2000, lambda: self._attempt_reconnect(slot_index))
 
     # ── Emulation ────────────────────────────────────────────────────
@@ -700,13 +695,7 @@ class GCControllerEnabler:
         if slot.emu_mgr.is_emulating:
             slot.emu_mgr.stop()
             sui.emulate_btn.config(text="Start Emulation")
-            if slot.is_connected:
-                if slot.ble_connected:
-                    self.ui.update_status(slot_index, "Connected via BLE")
-                else:
-                    self.ui.update_status(slot_index, "Connected via HID")
-            else:
-                self.ui.update_status(slot_index, "Ready to connect")
+            self.ui.update_emu_status(slot_index, "")
             self.ui.update_tab_status(slot_index, connected=slot.is_connected, emulating=False)
         else:
             mode = sui.emu_mode_var.get()
@@ -723,10 +712,10 @@ class GCControllerEnabler:
                 sui.emulate_btn.config(text="Stop Emulation")
                 pipe_name = f'gc_controller_{slot_index + 1}'
                 if mode == 'dolphin_pipe':
-                    self.ui.update_status(slot_index,
-                                          f"Dolphin pipe emulation active ({pipe_name})")
+                    self.ui.update_emu_status(
+                        slot_index, f"Dolphin pipe active ({pipe_name})")
                 else:
-                    self.ui.update_status(slot_index, "Xbox 360 emulation active")
+                    self.ui.update_emu_status(slot_index, "Xbox 360 active")
                 self.ui.update_tab_status(slot_index, connected=True, emulating=True)
             except OSError as e:
                 if e.errno == errno.ENXIO:
@@ -829,8 +818,8 @@ class GCControllerEnabler:
         self.root.after(0, lambda: self.ui.update_status(slot_index, message))
 
     def _schedule_progress(self, slot_index: int, value: int):
-        """Thread-safe progress bar update via root.after."""
-        self.root.after(0, lambda: self.ui.slots[slot_index].progress.configure(value=value))
+        """No-op — progress bar replaced by log text area."""
+        pass
 
     def _schedule_ui_update(self, slot_index: int, left_x, left_y, right_x, right_y,
                             left_trigger, right_trigger, button_states,

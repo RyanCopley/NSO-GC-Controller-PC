@@ -24,8 +24,12 @@ class SlotUI:
         self.tab_frame: ttk.Frame = None
         self.connect_btn: ttk.Button = None
         self.emulate_btn: ttk.Button = None
-        self.progress: ttk.Progressbar = None
-        self.status_label: ttk.Label = None
+
+        # BLE section
+        self.pair_btn: Optional[ttk.Button] = None
+
+        # Shared status label (below all 3 sections)
+        self.status_label: Optional[ttk.Label] = None
 
         # Sticks
         self.left_stick_canvas: tk.Canvas = None
@@ -53,10 +57,6 @@ class SlotUI:
         self.device_var: tk.StringVar = None
         self.device_combo: ttk.Combobox = None
         self.device_paths: list = []  # parallel list: index 0 = None (Auto), rest = bytes paths
-
-        # BLE
-        self.pair_btn: Optional[ttk.Button] = None
-        self.ble_status_label: Optional[ttk.Label] = None
 
         # Modes
         self.trigger_mode_var: tk.BooleanVar = None
@@ -122,11 +122,8 @@ class ControllerUI:
         global_frame = ttk.Frame(outer_frame)
         global_frame.grid(row=1, column=0, pady=(5, 0))
 
-        ttk.Checkbutton(global_frame, text="Connect and Emulate all at startup",
-                        variable=self.auto_connect_var).pack(side=tk.LEFT, padx=(0, 10))
-
         ttk.Button(global_frame, text="Save All Settings",
-                   command=on_save).pack(side=tk.LEFT, padx=(10, 0))
+                   command=on_save).pack(side=tk.LEFT)
 
         # Track global setting changes (stored on slot 0)
         self.auto_connect_var.trace_add('write', lambda *_: self.mark_slot_dirty(0))
@@ -151,62 +148,24 @@ class ControllerUI:
             emu_default = 'dolphin_pipe'
         slot_ui.emu_mode_var = tk.StringVar(value=emu_default)
 
-        # Connection section
-        connection_frame = ttk.LabelFrame(tab, text="Connection", padding="10")
-        connection_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
-        connection_frame.columnconfigure(1, weight=1)
+        # ── Top row: 3 equal-width sections ──
+        top_frame = ttk.Frame(tab)
+        top_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        top_frame.columnconfigure(0, weight=1)
+        top_frame.columnconfigure(1, weight=1)
+        top_frame.columnconfigure(2, weight=1)
 
-        # Row 0: buttons + status
-        btn_frame = ttk.Frame(connection_frame)
-        btn_frame.grid(row=0, column=0, columnspan=3, sticky=tk.W)
+        self._build_usb_section(top_frame, index, slot_ui, on_connect, on_refresh)
+        self._build_ble_section(top_frame, index, slot_ui, on_pair)
+        self._build_emu_section(top_frame, index, slot_ui, on_emulate)
 
-        slot_ui.connect_btn = ttk.Button(
-            btn_frame, text="Connect",
-            command=lambda i=index: on_connect(i))
-        slot_ui.connect_btn.pack(side=tk.LEFT, padx=(0, 5))
-
-        slot_ui.emulate_btn = ttk.Button(
-            btn_frame, text="Start Emulation",
-            command=lambda i=index: on_emulate(i), state='disabled')
-        slot_ui.emulate_btn.pack(side=tk.LEFT, padx=(0, 5))
-
-        ttk.Button(btn_frame, text="Refresh",
-                   command=lambda: on_refresh()).pack(side=tk.LEFT, padx=(0, 10))
-
-        slot_ui.status_label = ttk.Label(btn_frame, text="Ready to connect")
-        slot_ui.status_label.pack(side=tk.LEFT)
-
-        # Row 1: device selector
-        ttk.Label(connection_frame, text="Device:").grid(
-            row=1, column=0, padx=(0, 5), pady=(5, 0), sticky=tk.W)
-        slot_ui.device_var = tk.StringVar(value="Auto (first available)")
-        slot_ui.device_combo = ttk.Combobox(connection_frame, textvariable=slot_ui.device_var,
-                                            state='readonly')
-        slot_ui.device_combo['values'] = ["Auto (first available)"]
-        slot_ui.device_combo.grid(row=1, column=1, columnspan=2, pady=(5, 0), sticky=(tk.W, tk.E))
-        slot_ui.device_paths = [None]  # parallel list: None = Auto
-
-        # Row 2: progress bar
-        slot_ui.progress = ttk.Progressbar(connection_frame, length=200, mode='determinate')
-        slot_ui.progress.grid(row=2, column=0, columnspan=3, pady=(10, 0), sticky=(tk.W, tk.E))
-
-        # Bluetooth section (only shown if BLE is available)
-        if self._ble_available and on_pair:
-            ble_frame = ttk.LabelFrame(tab, text="Bluetooth", padding="5")
-            ble_frame.grid(row=0, column=2, rowspan=1, sticky=(tk.N, tk.W, tk.E),
-                           padx=(10, 0), pady=(0, 10))
-
-            slot_ui.pair_btn = ttk.Button(
-                ble_frame, text="Pair Controller",
-                command=lambda i=index: on_pair(i))
-            slot_ui.pair_btn.grid(row=0, column=0, padx=5, pady=2, sticky=tk.W)
-
-            slot_ui.ble_status_label = ttk.Label(ble_frame, text="")
-            slot_ui.ble_status_label.grid(row=1, column=0, padx=5, pady=(0, 2), sticky=tk.W)
+        # Shared status label below the 3 sections
+        slot_ui.status_label = ttk.Label(tab, text="Ready to connect")
+        slot_ui.status_label.grid(row=1, column=0, columnspan=2, pady=(0, 5))
 
         # Left column
         left_column = ttk.Frame(tab)
-        left_column.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N), padx=(0, 10))
+        left_column.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N), padx=(0, 10))
 
         # Button visualization
         controller_frame = ttk.LabelFrame(left_column, text="Button Configuration", padding="10")
@@ -246,7 +205,7 @@ class ControllerUI:
 
         # Right column
         right_column = ttk.Frame(tab)
-        right_column.grid(row=1, column=1, sticky=(tk.W, tk.E, tk.N))
+        right_column.grid(row=2, column=1, sticky=(tk.W, tk.E, tk.N))
 
         # Analog triggers section
         calibration_frame = ttk.LabelFrame(right_column, text="Analog Triggers", padding="10")
@@ -331,18 +290,6 @@ class ControllerUI:
                         variable=slot_ui.trigger_mode_var, value=False).grid(
                             row=1, column=0, sticky=tk.W)
 
-        # Emulation mode
-        emu_frame = ttk.LabelFrame(right_column, text="Emulation Mode", padding="5")
-        emu_frame.grid(row=1, column=0, pady=(10, 0), sticky=(tk.W, tk.E))
-
-        xbox_state = 'disabled' if IS_MACOS else 'normal'
-        ttk.Radiobutton(emu_frame, text="Xbox 360",
-                        variable=slot_ui.emu_mode_var, value='xbox360',
-                        state=xbox_state).grid(row=0, column=0, sticky=tk.W)
-        ttk.Radiobutton(emu_frame, text="Dolphin (Named Pipe)",
-                        variable=slot_ui.emu_mode_var, value='dolphin_pipe').grid(
-                            row=1, column=0, sticky=tk.W)
-
         # Track per-slot setting changes
         slot_ui.trigger_mode_var.trace_add('write', lambda *_, i=index: self.mark_slot_dirty(i))
         slot_ui.emu_mode_var.trace_add('write', lambda *_, i=index: self.mark_slot_dirty(i))
@@ -350,6 +297,82 @@ class ControllerUI:
         # Configure grid weights
         tab.columnconfigure(0, weight=1)
         tab.columnconfigure(1, weight=1)
+
+    # ── Top-row section builders ────────────────────────────────────
+
+    def _build_usb_section(self, parent, index, slot_ui, on_connect, on_refresh):
+        """Build the USB connection section."""
+        frame = ttk.LabelFrame(parent, text="USB", padding="5")
+        frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(0, 3))
+        frame.columnconfigure(0, weight=1)
+
+        # Connect + Refresh buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=0, column=0, sticky=tk.W)
+
+        slot_ui.connect_btn = ttk.Button(
+            btn_frame, text="Connect",
+            command=lambda i=index: on_connect(i))
+        slot_ui.connect_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        ttk.Button(btn_frame, text="Refresh",
+                   command=lambda: on_refresh()).pack(side=tk.LEFT)
+
+        # Device selector
+        dev_frame = ttk.Frame(frame)
+        dev_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(5, 0))
+        dev_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(dev_frame, text="Device:").grid(
+            row=0, column=0, padx=(0, 5), sticky=tk.W)
+        slot_ui.device_var = tk.StringVar(value="Auto (first available)")
+        slot_ui.device_combo = ttk.Combobox(dev_frame, textvariable=slot_ui.device_var,
+                                            state='readonly')
+        slot_ui.device_combo['values'] = ["Auto (first available)"]
+        slot_ui.device_combo.grid(row=0, column=1, sticky=(tk.W, tk.E))
+        slot_ui.device_paths = [None]
+
+        # Auto-connect checkbox (USB-only feature, same var across all tabs)
+        ttk.Checkbutton(frame, text="Auto-connect at startup",
+                        variable=self.auto_connect_var).grid(
+                            row=2, column=0, pady=(5, 0), sticky=tk.W)
+
+    def _build_ble_section(self, parent, index, slot_ui, on_pair):
+        """Build the Bluetooth section."""
+        frame = ttk.LabelFrame(parent, text="Bluetooth", padding="5")
+        frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N, tk.S), padx=3)
+        frame.columnconfigure(0, weight=1)
+
+        if self._ble_available and on_pair:
+            slot_ui.pair_btn = ttk.Button(
+                frame, text="Pair Controller",
+                command=lambda i=index: on_pair(i))
+            slot_ui.pair_btn.grid(row=0, column=0, sticky=tk.W)
+        else:
+            ttk.Label(frame, text="Not available",
+                      foreground='gray').grid(row=0, column=0, sticky=tk.W)
+
+
+    def _build_emu_section(self, parent, index, slot_ui, on_emulate):
+        """Build the Emulation section."""
+        frame = ttk.LabelFrame(parent, text="Emulation", padding="5")
+        frame.grid(row=0, column=2, sticky=(tk.W, tk.E, tk.N, tk.S), padx=(3, 0))
+        frame.columnconfigure(0, weight=1)
+
+        slot_ui.emulate_btn = ttk.Button(
+            frame, text="Start Emulation",
+            command=lambda i=index: on_emulate(i), state='disabled')
+        slot_ui.emulate_btn.grid(row=0, column=0, sticky=tk.W)
+
+        # Emulation mode radios
+        xbox_state = 'disabled' if IS_MACOS else 'normal'
+        ttk.Radiobutton(frame, text="Xbox 360",
+                        variable=slot_ui.emu_mode_var, value='xbox360',
+                        state=xbox_state).grid(row=1, column=0, sticky=tk.W)
+        ttk.Radiobutton(frame, text="Dolphin (Named Pipe)",
+                        variable=slot_ui.emu_mode_var, value='dolphin_pipe').grid(
+                            row=2, column=0, sticky=tk.W)
+
 
     # ── Device selector helpers ─────────────────────────────────────
 
@@ -616,6 +639,7 @@ class ControllerUI:
         s.left_trigger_label.config(text="0")
         s.right_trigger_label.config(text="0")
 
+
     def redraw_octagons(self, slot_index: int):
         """Redraw both octagon polygons from calibration data for a slot."""
         s = self.slots[slot_index]
@@ -627,11 +651,15 @@ class ControllerUI:
     # ── Status helpers ───────────────────────────────────────────────
 
     def update_status(self, slot_index: int, message: str):
-        """Update the status label text for a specific slot."""
-        self.slots[slot_index].status_label.config(text=message)
+        """Update the shared status label for a specific slot."""
+        s = self.slots[slot_index]
+        if s.status_label and message:
+            s.status_label.config(text=message)
 
     def update_ble_status(self, slot_index: int, message: str):
-        """Update the BLE status label for a specific slot."""
-        s = self.slots[slot_index]
-        if s.ble_status_label:
-            s.ble_status_label.config(text=message)
+        """Update status with a BLE message."""
+        self.update_status(slot_index, message)
+
+    def update_emu_status(self, slot_index: int, message: str):
+        """Update status with an emulation message."""
+        self.update_status(slot_index, message)
