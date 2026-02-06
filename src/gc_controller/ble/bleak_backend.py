@@ -1,11 +1,11 @@
 """
 Bleak BLE Backend
 
-macOS (CoreBluetooth) BLE backend using the Bleak library.
+macOS/Windows BLE backend using the Bleak library.
 Approach modeled after nso-gc-bridge: scan all devices, try connecting to each,
 send handshake to identify the controller, then subscribe to notifications.
 
-CoreBluetooth handles SMP pairing, MTU negotiation, and encryption automatically.
+The OS BLE stack handles SMP pairing, MTU negotiation, and encryption automatically.
 No elevated privileges needed.
 """
 
@@ -52,7 +52,7 @@ def _log(msg: str):
 
 
 class BleakBackend:
-    """Manages BLE connections via Bleak (CoreBluetooth on macOS).
+    """Manages BLE connections via Bleak (macOS/Windows).
 
     Follows the nso-gc-bridge approach: scan all devices, try connecting
     to each, verify with a handshake write, then subscribe to notifications.
@@ -66,7 +66,7 @@ class BleakBackend:
         return True
 
     async def open(self):
-        """No-op — CoreBluetooth is always available in userspace."""
+        """No-op — the OS BLE stack is always available in userspace."""
         pass
 
     async def scan_and_connect(

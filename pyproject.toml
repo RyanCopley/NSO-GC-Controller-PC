@@ -13,6 +13,7 @@ dependencies = [
     "vgamepad>=0.0.8; sys_platform == 'win32'",
     "evdev>=1.7.0; sys_platform == 'linux'",
     "bleak>=0.21.0; sys_platform == 'darwin'",
+    "bleak>=0.21.0; sys_platform == 'win32'",
 ]
 
 [project.scripts]

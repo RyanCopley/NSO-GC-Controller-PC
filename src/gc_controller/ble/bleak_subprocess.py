@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""BLE subprocess for macOS — uses Bleak (CoreBluetooth).
+"""BLE subprocess for macOS/Windows — uses Bleak.
 
 No elevated privileges needed. Same JSON-line IPC protocol as ble_subprocess.py.
 

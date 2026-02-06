@@ -71,6 +71,11 @@ if sys.platform == "win32":
         'vgamepad.win',
         'vgamepad.win.vigem_client',
         'vgamepad.win.virtual_gamepad',
+        'bleak',
+        'gc_controller.ble',
+        'gc_controller.ble.bleak_backend',
+        'gc_controller.ble.bleak_subprocess',
+        'gc_controller.ble.sw2_protocol',
     ]
 elif sys.platform == "linux":
     hiddenimports += [

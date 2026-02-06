@@ -238,8 +238,8 @@ class GCControllerEnabler:
     # ── BLE subprocess helpers ────────────────────────────────────────
 
     def _start_ble_subprocess(self):
-        """Start the BLE subprocess. Uses pkexec on Linux, direct spawn on macOS."""
-        if sys.platform == 'darwin':
+        """Start the BLE subprocess. Uses pkexec on Linux, direct spawn on macOS/Windows."""
+        if sys.platform == 'darwin' or sys.platform == 'win32':
             script_path = os.path.join(
                 os.path.dirname(__file__), 'ble', 'bleak_subprocess.py')
             python_path = os.pathsep.join(p for p in sys.path if p)
@@ -389,7 +389,7 @@ class GCControllerEnabler:
         if self._ble_initialized:
             return True
 
-        if sys.platform != 'darwin' and not shutil.which('pkexec'):
+        if sys.platform == 'linux' and not shutil.which('pkexec'):
             self._messagebox.showerror(
                 "BLE Error",
                 "pkexec is required for Bluetooth LE.\n\n"
@@ -404,7 +404,7 @@ class GCControllerEnabler:
                 "BLE Error", f"Failed to start BLE service:\n{e}")
             return False
 
-        # Wait for subprocess to start (user authenticates via pkexec)
+        # Wait for subprocess to start (user authenticates via pkexec on Linux)
         result = self._wait_ble_init(timeout=60)
         if not result or result.get('e') != 'ready':
             self._cleanup_ble()
@@ -1036,8 +1036,8 @@ class _BleHeadlessManager:
         self._init_result = None
 
     def start_subprocess(self):
-        """Start the BLE subprocess. Uses pkexec on Linux, direct spawn on macOS."""
-        if sys.platform == 'darwin':
+        """Start the BLE subprocess. Uses pkexec on Linux, direct spawn on macOS/Windows."""
+        if sys.platform == 'darwin' or sys.platform == 'win32':
             script_path = os.path.join(
                 os.path.dirname(__file__), 'ble', 'bleak_subprocess.py')
             python_path = os.pathsep.join(p for p in sys.path if p)
@@ -1096,7 +1096,7 @@ class _BleHeadlessManager:
         if self._initialized:
             return True
 
-        if sys.platform != 'darwin' and not shutil.which('pkexec'):
+        if sys.platform == 'linux' and not shutil.which('pkexec'):
             print("BLE Error: pkexec is required for Bluetooth LE.")
             print("Install with: sudo apt install policykit-1")
             return False
