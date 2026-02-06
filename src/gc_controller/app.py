@@ -252,6 +252,7 @@ class GCControllerEnabler:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
             )
@@ -267,6 +268,7 @@ class GCControllerEnabler:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
             )
@@ -1059,6 +1061,7 @@ class _BleHeadlessManager:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
             )
@@ -1074,6 +1077,7 @@ class _BleHeadlessManager:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
             )
