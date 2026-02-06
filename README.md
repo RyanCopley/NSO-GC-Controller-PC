@@ -2,15 +2,28 @@
 
 # GameCube Controller Enabler
 
-A cross-platform Python/Tkinter tool that connects Nintendo GameCube controllers via USB and makes them usable on Steam and other platforms through Xbox 360 controller emulation.
+A cross-platform Python/Tkinter tool that connects Nintendo Switch Online GameCube controllers via USB or Bluetooth and makes them usable on Steam and other platforms through Xbox 360 controller emulation. Supports up to 4 simultaneous controllers.
 
 ## Features
 
-- USB initialization and HID communication with GameCube controllers
-- Xbox 360 controller emulation (Windows via vgamepad, Linux via evdev/uinput)
-- Analog trigger calibration for different controller variations
-- Real-time visualization of inputs (buttons, sticks, triggers)
-- Persistent calibration settings
+- **Multi-controller support** — connect up to 4 controllers simultaneously, each with independent calibration and settings
+- **USB and Bluetooth** — connect via USB HID or Bluetooth Low Energy (BLE on Linux)
+- **Xbox 360 emulation** — virtual gamepad via vgamepad on Windows and evdev/uinput on Linux
+- **Dolphin pipe mode** — named FIFO pipes for direct Dolphin emulator integration (Linux/macOS)
+- **Stick calibration** — octagon-based deadzone detection across 8 directional sectors
+- **Trigger calibration** — guided wizard to set base, bump, and max values per controller
+- **Headless mode** — run without a GUI for background/daemon-style operation
+- **Auto-connect** — automatically reconnect to preferred controllers on startup
+- **Persistent settings** — per-slot calibration, device preferences, and emulation mode saved to JSON
+
+## Platform Support
+
+| Feature | Windows | Linux | macOS |
+|---|---|---|---|
+| USB connection | Yes | Yes | Yes |
+| Bluetooth (BLE) | — | Yes | — |
+| Xbox 360 emulation | Yes (ViGEmBus) | Yes (evdev/uinput) | — |
+| Dolphin pipe mode | — | Yes | Yes |
 
 ## Requirements
 
@@ -38,10 +51,11 @@ sudo cp platform/linux/99-gc-controller.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 - Log out and back in for group changes to take effect
+- **For Bluetooth**: install the [Bumble](https://github.com/nickoala/bumble) BLE stack (`pip install bumble`). BLE requires elevated privileges and will prompt via `pkexec`.
 
 ### macOS
 - Install libusb: `brew install libusb`
-- Xbox 360 controller emulation is not available on macOS
+- Xbox 360 emulation is not available on macOS; use Dolphin pipe mode instead
 
 ## Usage
 
@@ -51,9 +65,19 @@ pip install -e .
 python -m gc_controller
 ```
 
-1. Connect your GameCube controller via USB
-2. Click **Connect** to initialize the controller
-3. Click **Emulate Xbox 360** to start virtual controller emulation
+1. Connect your GameCube controller via USB or click **Pair Controller** to connect over Bluetooth
+2. Click **Connect** to initialize a USB controller (or use **Auto-connect at startup**)
+3. Select an emulation mode (**Xbox 360** or **Dolphin Named Pipe**) and click **Start Emulation**
+
+### Headless Mode
+
+Run without the GUI for background operation:
+```bash
+python -m gc_controller --headless
+python -m gc_controller --headless --mode dolphin_pipe
+```
+
+This uses saved settings to auto-connect and emulate all configured controller slots.
 
 ## Building Executables
 
@@ -70,15 +94,20 @@ python build_all.py
 
 ## Calibration
 
-Each GameCube controller may have different analog trigger ranges. Configure via the calibration section:
+### Trigger Calibration
 
-- **Base Value**: Resting trigger position (typically ~32)
-- **Bump Value**: Position where trigger "clicks" (typically ~190)
-- **Max Value**: Fully pressed position (typically ~230)
+Each GameCube controller may have different analog trigger ranges. The calibration wizard walks through 4 steps:
 
-Trigger modes:
-- **100% at bump**: Full trigger response at the click point
-- **100% at press**: Full trigger response at maximum press
+1. **Base Value** — resting trigger position (typically ~32)
+2. **Bump Value** — position where the trigger "clicks" (typically ~190)
+3. **Max Value** — fully pressed position (typically ~230)
+4. **Trigger Mode** — choose between:
+   - **100% at bump**: full response at the click point
+   - **100% at press**: full response at maximum press
+
+### Stick Calibration
+
+Octagon-based calibration maps the physical range of each analog stick across 8 directional sectors. During calibration, rotate each stick around its full range to record the boundaries. Calibration data is saved per-slot.
 
 ## Project Structure
 
@@ -88,21 +117,25 @@ src/gc_controller/
   __main__.py               Entry point (python -m gc_controller)
   app.py                    Main application orchestrator
   controller_constants.py   Shared constants, button mappings, calibration defaults
-  settings_manager.py       JSON settings load/save
+  controller_slot.py        Per-controller state container
+  settings_manager.py       JSON settings load/save (v2 multi-slot format)
   calibration.py            Stick and trigger calibration logic
   connection_manager.py     USB initialization and HID connection
   emulation_manager.py      Xbox 360 virtual controller emulation
   controller_ui.py          Tkinter UI widgets and display updates
   input_processor.py        HID read thread and data processing
   virtual_gamepad.py        Cross-platform gamepad abstraction
+  ble/
+    __init__.py             BLE availability detection and utilities
+    bumble_backend.py       Bumble HCI transport and GATT client
+    sw2_protocol.py         Switch controller BLE protocol (pairing, input reports)
+    ble_subprocess.py       Privileged subprocess runner for BLE operations
+    ble_event_loop.py       Asyncio integration helper
 pyproject.toml              Project metadata and dependencies
-gc_controller_enabler.spec  PyInstaller spec file
+GC-Controller-Enabler.spec  PyInstaller spec file
 build_all.py                Unified build script
 images/
-  controller.png            Application icon
-  stick_left.png            Left stick icon
-  stick_right.png           Right stick icon
-  Screenshot *.png          Application screenshot
+  screenshot.png            Application screenshot
 platform/
   linux/
     build.sh                Linux build script
@@ -121,13 +154,19 @@ platform/
 - Verify Vendor ID `0x057e` and Product ID `0x2073` (check `lsusb` on Linux or Device Manager on Windows)
 
 ### Emulation Not Working
-- **Windows**: Install [ViGEmBus](https://github.com/nefarius/ViGEmBus) and `pip install vgamepad`
-- **Linux**: Install evdev (`pip install evdev`), ensure your user is in the `input` group, and install the udev rules
-- **macOS**: Not supported
+- **Windows**: install [ViGEmBus](https://github.com/nefarius/ViGEmBus) and `pip install vgamepad`
+- **Linux**: install evdev (`pip install evdev`), ensure your user is in the `input` group, and install the udev rules
+- **macOS**: Xbox 360 emulation is not supported; use Dolphin pipe mode
+
+### Bluetooth Issues (Linux)
+- BLE requires the Bumble library: `pip install bumble`
+- The BLE subprocess needs elevated privileges and will prompt via `pkexec`
+- BlueZ is temporarily stopped while BLE is active (Bumble takes direct HCI control)
+- If Bluetooth fails to initialize, ensure your HCI adapter is available (`hciconfig`)
 
 ### Permission Errors
 - **Windows**: HID access may require administrator privileges
-- **Linux**: Add your user to `input` group and install udev rules:
+- **Linux**: add your user to the `input` group and install udev rules:
   ```bash
   sudo usermod -aG input $USER
   sudo cp platform/linux/99-gc-controller.rules /etc/udev/rules.d/
