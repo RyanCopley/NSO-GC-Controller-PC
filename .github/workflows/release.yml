@@ -21,7 +21,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libusb-1.0-0-dev libbluetooth-dev python3-venv
+          sudo apt-get install -y libusb-1.0-0-dev libbluetooth-dev python3-venv python3-tk
 
       - name: Set up Python venv
         run: |
