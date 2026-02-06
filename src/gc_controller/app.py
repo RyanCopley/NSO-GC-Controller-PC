@@ -1013,11 +1013,191 @@ class GCControllerEnabler:
         self.root.mainloop()
 
 
+class _BleHeadlessManager:
+    """Manages the BLE subprocess for headless mode (no Tkinter)."""
+
+    def __init__(self):
+        self._subprocess = None
+        self._reader_thread = None
+        self._initialized = False
+        self._init_event = threading.Event()
+        self._init_result = None
+
+    def start_subprocess(self):
+        """Start the privileged BLE subprocess via pkexec."""
+        script_path = os.path.join(
+            os.path.dirname(__file__), 'ble', 'ble_subprocess.py')
+        python_path = os.pathsep.join(p for p in sys.path if p)
+
+        self._subprocess = subprocess.Popen(
+            ['pkexec', sys.executable, script_path, python_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+    def send_cmd(self, cmd: dict):
+        """Send a JSON-line command to the BLE subprocess."""
+        if self._subprocess and self._subprocess.poll() is None:
+            try:
+                line = json.dumps(cmd, separators=(',', ':')) + '\n'
+                self._subprocess.stdin.write(line)
+                self._subprocess.stdin.flush()
+            except Exception:
+                pass
+
+    def _wait_init(self, timeout: float) -> dict | None:
+        """Block until the next init event from the BLE subprocess."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._subprocess and self._subprocess.poll() is not None:
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            if self._init_event.wait(timeout=min(remaining, 0.5)):
+                result = self._init_result
+                self._init_event.clear()
+                return result
+        return None
+
+    def init_ble(self, on_data, on_event) -> bool:
+        """Full init sequence: spawn → start reader → wait ready → stop_bluez → open HCI.
+
+        The reader thread must be running before we wait for init events,
+        so on_data and on_event callbacks are required upfront.
+        Returns True on success, prints errors to stdout.
+        """
+        if self._initialized:
+            return True
+
+        if not shutil.which('pkexec'):
+            print("BLE Error: pkexec is required for Bluetooth LE.")
+            print("Install with: sudo apt install policykit-1")
+            return False
+
+        try:
+            self.start_subprocess()
+        except Exception as e:
+            print(f"BLE Error: Failed to start BLE service: {e}")
+            return False
+
+        # Start reader thread immediately so it can receive init-phase events
+        self.start_reader(on_data, on_event)
+
+        # Wait for subprocess to start (user authenticates via pkexec)
+        result = self._wait_init(timeout=60)
+        if not result or result.get('e') != 'ready':
+            self.shutdown()
+            print("BLE Error: BLE service failed to start. "
+                  "Authentication may have been cancelled.")
+            return False
+
+        # Stop BlueZ (must release HCI adapter for Bumble)
+        self.send_cmd({"cmd": "stop_bluez"})
+        result = self._wait_init(timeout=15)
+        if not result or result.get('e') != 'bluez_stopped':
+            self.shutdown()
+            print("BLE Error: Failed to stop BlueZ.")
+            return False
+
+        # Open HCI adapter
+        self.send_cmd({"cmd": "open"})
+        result = self._wait_init(timeout=15)
+        if not result or result.get('e') == 'error':
+            msg = result.get('msg', 'Unknown error') if result else 'Timeout'
+            self.shutdown()
+            print(f"BLE Error: Failed to initialize BLE: {msg}")
+            print("Make sure a Bluetooth adapter is connected.")
+            return False
+
+        self._initialized = True
+        return True
+
+    def start_reader(self, on_data, on_event):
+        """Start the event reader thread.
+
+        Args:
+            on_data: callback(slot_index, data_bytes) for low-latency data events
+            on_event: callback(event_dict) for runtime events (connected, disconnected, etc.)
+        """
+        self._reader_thread = threading.Thread(
+            target=self._event_reader, args=(on_data, on_event), daemon=True)
+        self._reader_thread.start()
+
+    def _event_reader(self, on_data, on_event):
+        """Read events from the BLE subprocess stdout (runs in a thread)."""
+        try:
+            for line in self._subprocess.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                etype = event.get('e')
+
+                # Init-phase events: signal the main thread directly
+                if not self._initialized and etype in (
+                        'ready', 'bluez_stopped', 'open_ok', 'error'):
+                    self._init_result = event
+                    self._init_event.set()
+                    continue
+
+                # Data events: put directly into slot queue (low latency)
+                if etype == 'data':
+                    si = event.get('s')
+                    if si is not None:
+                        data = base64.b64decode(event['d'])
+                        on_data(si, data)
+                    continue
+
+                # Other runtime events: dispatch to event queue
+                on_event(event)
+        except Exception:
+            pass
+
+    def shutdown(self):
+        """Send shutdown, terminate process."""
+        if self._subprocess:
+            try:
+                self.send_cmd({"cmd": "shutdown"})
+                self._subprocess.wait(timeout=5.0)
+            except Exception:
+                pass
+            try:
+                self._subprocess.stdin.close()
+            except Exception:
+                pass
+            try:
+                self._subprocess.terminate()
+                self._subprocess.wait(timeout=3)
+            except Exception:
+                try:
+                    self._subprocess.kill()
+                except Exception:
+                    pass
+            self._subprocess = None
+        self._initialized = False
+
+    @property
+    def is_alive(self) -> bool:
+        return (self._subprocess is not None
+                and self._subprocess.poll() is None
+                and self._initialized)
+
+
 def run_headless(mode_override: str = None):
     """Run controller connection and emulation without the GUI.
 
-    Connects up to 4 controllers, each with its own emulation thread.
+    Connects up to 4 controllers (USB and/or BLE), each with its own
+    emulation thread.
     """
+    import queue as _queue
+
     slot_calibrations = [dict(DEFAULT_CALIBRATION) for _ in range(MAX_SLOTS)]
 
     settings_mgr = SettingsManager(slot_calibrations, os.getcwd())
@@ -1042,21 +1222,31 @@ def run_headless(mode_override: str = None):
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Enumerate and connect all available controllers
+    # Enumerate USB controllers
     all_hid = ConnectionManager.enumerate_devices()
-    if not all_hid:
-        print("No GameCube controllers found. Is one plugged in?")
+    ble_available = is_ble_available()
+
+    if not all_hid and not ble_available:
+        print("No GameCube controllers found and no BLE adapter available.")
         sys.exit(1)
 
     # Initialize all USB devices
-    usb_devices = ConnectionManager.enumerate_usb_devices()
-    for usb_dev in usb_devices:
-        tmp = ConnectionManager(on_status=lambda msg: None, on_progress=lambda val: None)
-        tmp.initialize_via_usb(usb_device=usb_dev)
+    if all_hid:
+        usb_devices = ConnectionManager.enumerate_usb_devices()
+        for usb_dev in usb_devices:
+            tmp = ConnectionManager(on_status=lambda msg: None, on_progress=lambda val: None)
+            tmp.initialize_via_usb(usb_device=usb_dev)
 
     all_paths = {d['path'] for d in all_hid}
     active_slots: list[dict] = []
     claimed_paths = set()
+
+    # BLE state
+    ble_mgr = None
+    ble_event_queue = _queue.Queue()
+    ble_data_queues: dict[int, _queue.Queue] = {}  # slot_index -> data queue
+    ble_scanning_slot = None  # slot index currently being scanned for
+    ble_pending_reconnects: dict[int, str] = {}  # slot_index -> MAC for disconnected controllers
 
     # Build slot -> preferred path mapping from settings
     slot_preferred: dict[int, bytes] = {}
@@ -1067,10 +1257,12 @@ def run_headless(mode_override: str = None):
             if pref_bytes in all_paths:
                 slot_preferred[i] = pref_bytes
 
-    print(f"Found {len(all_hid)} controller(s). Connecting up to {min(MAX_SLOTS, len(all_hid))}...")
+    if all_hid:
+        print(f"Found {len(all_hid)} USB controller(s). "
+              f"Connecting up to {min(MAX_SLOTS, len(all_hid))}...")
 
     def _connect_slot(i, path):
-        """Helper to connect a single slot to a specific HID path."""
+        """Helper to connect a single USB slot to a specific HID path."""
         cal = slot_calibrations[i]
         cal_mgr = CalibrationManager(cal)
         conn_mgr = ConnectionManager(
@@ -1111,6 +1303,7 @@ def run_headless(mode_override: str = None):
 
         active_slots.append({
             'index': i,
+            'type': 'usb',
             'cal_mgr': cal_mgr,
             'conn_mgr': conn_mgr,
             'emu_mgr': emu_mgr,
@@ -1119,13 +1312,13 @@ def run_headless(mode_override: str = None):
             'disc_event': disc_event,
         })
 
-    # First pass: assign preferred devices to their slots
+    # First pass: assign preferred USB devices to their slots
     for i in range(MAX_SLOTS):
         pref = slot_preferred.get(i)
         if pref and pref not in claimed_paths:
             _connect_slot(i, pref)
 
-    # Second pass: fill remaining slots with unclaimed devices
+    # Second pass: fill remaining slots with unclaimed USB devices
     for i in range(MAX_SLOTS):
         if any(s['index'] == i for s in active_slots):
             continue
@@ -1138,20 +1331,260 @@ def run_headless(mode_override: str = None):
             break
         _connect_slot(i, target['path'])
 
-    if not active_slots:
-        print("Failed to connect any controllers.")
+    # ── BLE setup ──────────────────────────────────────────────────
+    def _open_ble_slots() -> list[int]:
+        """Return slot indices not occupied by any active connection."""
+        used = {s['index'] for s in active_slots}
+        return [i for i in range(MAX_SLOTS) if i not in used]
+
+    def _on_ble_data(slot_index, data_bytes):
+        """Low-latency callback from the reader thread for BLE data."""
+        q = ble_data_queues.get(slot_index)
+        if q is not None:
+            try:
+                q.put_nowait(data_bytes)
+            except _queue.Full:
+                pass
+
+    def _on_ble_event(event):
+        """Runtime event callback from the reader thread."""
+        ble_event_queue.put(event)
+
+    def _get_connected_ble_addresses() -> list[str]:
+        """Return MACs of all currently connected + pending-reconnect BLE controllers."""
+        addrs = []
+        for s in active_slots:
+            if s['type'] == 'ble' and s.get('ble_address'):
+                addrs.append(s['ble_address'])
+        for mac in ble_pending_reconnects.values():
+            if mac not in addrs:
+                addrs.append(mac)
+        return addrs
+
+    def _start_ble_scan():
+        """Issue scan_connect for the first open slot not pending reconnect."""
+        nonlocal ble_scanning_slot
+        # Skip slots that have targeted reconnects already running
+        open_slots = [i for i in _open_ble_slots()
+                      if i not in ble_pending_reconnects]
+        if not open_slots or not ble_mgr or not ble_mgr.is_alive:
+            ble_scanning_slot = None
+            return
+
+        slot_idx = open_slots[0]
+        ble_scanning_slot = slot_idx
+
+        # Use saved BLE address if available (direct reconnect)
+        saved_addr = slot_calibrations[slot_idx].get('preferred_ble_address', '') or None
+
+        # Exclude controllers already on other slots so the scan
+        # doesn't grab them if they briefly disconnect and re-advertise
+        exclude = _get_connected_ble_addresses()
+
+        print(f"[slot {slot_idx + 1}] BLE scanning"
+              f"{' for ' + saved_addr if saved_addr else ''}...")
+
+        ble_mgr.send_cmd({
+            "cmd": "scan_connect",
+            "slot_index": slot_idx,
+            "target_address": saved_addr,
+            "exclude_addresses": exclude if exclude else None,
+        })
+
+    def _handle_headless_ble_event(event):
+        """Process a BLE runtime event in the main loop."""
+        nonlocal ble_scanning_slot
+
+        etype = event.get('e')
+        si = event.get('s')
+
+        if etype == 'status' and si is not None:
+            print(f"[slot {si + 1}] BLE: {event.get('msg', '')}")
+
+        elif etype == 'connected' and si is not None:
+            mac = event.get('mac')
+            if not mac:
+                return
+
+            was_reconnect = si in ble_pending_reconnects
+            ble_pending_reconnects.pop(si, None)
+
+            print(f"[slot {si + 1}] BLE {'reconnected' if was_reconnect else 'connected'}: {mac}")
+
+            # Save address
+            slot_calibrations[si]['preferred_ble_address'] = mac
+            slot_calibrations[si]['connection_mode'] = 'ble'
+
+            # Create per-slot data queue, input processor, and emulation
+            cal = slot_calibrations[si]
+            cal_mgr = CalibrationManager(cal)
+            ble_q = _queue.Queue(maxsize=64)
+            ble_data_queues[si] = ble_q
+
+            emu_mgr = EmulationManager(cal_mgr)
+            slot_mode = mode_override if mode_override else cal.get('emulation_mode', mode)
+            mode_label = "Dolphin pipe" if slot_mode == 'dolphin_pipe' else "Xbox 360"
+            print(f"[slot {si + 1}] Starting {mode_label} emulation...")
+
+            try:
+                emu_mgr.start(slot_mode, slot_index=si)
+            except Exception as e:
+                print(f"[slot {si + 1}] Failed to start emulation: {e}")
+                ble_data_queues.pop(si, None)
+                return
+
+            disc_event = disconnect_events[si]
+
+            input_proc = InputProcessor(
+                device_getter=lambda: None,
+                calibration=cal,
+                cal_mgr=cal_mgr,
+                emu_mgr=emu_mgr,
+                on_ui_update=lambda *args: None,
+                on_error=lambda msg, idx=si: print(f"[slot {idx + 1}] {msg}"),
+                on_disconnect=lambda de=disc_event: de.set(),
+                ble_queue=ble_q,
+            )
+            input_proc.start(mode='ble')
+
+            active_slots.append({
+                'index': si,
+                'type': 'ble',
+                'cal_mgr': cal_mgr,
+                'conn_mgr': None,
+                'emu_mgr': emu_mgr,
+                'input_proc': input_proc,
+                'device_path': None,
+                'disc_event': disc_event,
+                'ble_address': mac,
+            })
+
+            ble_scanning_slot = None
+
+            # Scan for more controllers if open slots remain
+            if _open_ble_slots():
+                _start_ble_scan()
+            else:
+                print("All slots occupied.")
+
+        elif etype == 'connect_error' and si is not None:
+            msg = event.get('msg', 'Connection failed')
+            print(f"[slot {si + 1}] BLE connect error: {msg}")
+
+            if si in ble_pending_reconnects:
+                # Targeted reconnect failed — retry after 3 seconds
+                mac = ble_pending_reconnects[si]
+                if not stop_event.is_set():
+                    threading.Timer(3.0, lambda _si=si, _mac=mac:
+                        ble_event_queue.put(
+                            {'e': '_retry_reconnect', 's': _si, 'mac': _mac}
+                        )).start()
+            else:
+                # General scan failed — retry after 3 seconds
+                ble_scanning_slot = None
+                if not stop_event.is_set():
+                    threading.Timer(3.0, lambda: ble_event_queue.put(
+                        {'e': '_retry_scan'})).start()
+
+        elif etype == 'disconnected' and si is not None:
+            # Find the active slot info
+            slot_info = None
+            for s in active_slots:
+                if s['index'] == si and s['type'] == 'ble':
+                    slot_info = s
+                    break
+            if not slot_info:
+                return
+
+            print(f"[slot {si + 1}] BLE disconnected — will reconnect...")
+
+            # Stop input/emulation
+            slot_info['input_proc'].stop()
+            was_emulating = slot_info['emu_mgr'].is_emulating
+            if was_emulating:
+                slot_info['emu_mgr'].stop()
+            slot_info['was_emulating'] = was_emulating
+
+            # Remove from active slots so the slot is "open"
+            active_slots.remove(slot_info)
+            ble_data_queues.pop(si, None)
+
+            # Cancel the current general scan so it doesn't grab this
+            # controller on the wrong slot when it re-advertises
+            if ble_scanning_slot is not None:
+                ble_mgr.send_cmd({
+                    "cmd": "disconnect",
+                    "slot_index": ble_scanning_slot,
+                })
+                ble_scanning_slot = None
+
+            # Issue targeted reconnect with saved MAC
+            saved_mac = slot_info.get('ble_address')
+            if saved_mac and ble_mgr and ble_mgr.is_alive:
+                ble_pending_reconnects[si] = saved_mac
+                print(f"[slot {si + 1}] BLE reconnecting to {saved_mac}...")
+                ble_mgr.send_cmd({
+                    "cmd": "scan_connect",
+                    "slot_index": si,
+                    "target_address": saved_mac,
+                })
+
+        elif etype == '_retry_reconnect' and si is not None:
+            mac = event.get('mac')
+            if not stop_event.is_set() and si in ble_pending_reconnects and mac:
+                print(f"[slot {si + 1}] BLE retrying reconnect to {mac}...")
+                ble_mgr.send_cmd({
+                    "cmd": "scan_connect",
+                    "slot_index": si,
+                    "target_address": mac,
+                })
+
+        elif etype == '_retry_scan':
+            if not stop_event.is_set() and _open_ble_slots():
+                _start_ble_scan()
+
+        elif etype == 'error':
+            print(f"BLE Error: {event.get('msg', 'Unknown error')}")
+
+    # ── Initialize BLE if needed ───────────────────────────────────
+    if ble_available and _open_ble_slots():
+        ble_mgr = _BleHeadlessManager()
+        print("Initializing BLE...")
+        if ble_mgr.init_ble(_on_ble_data, _on_ble_event):
+            print("BLE initialized successfully.")
+            _start_ble_scan()
+        else:
+            print("BLE initialization failed. Continuing with USB only.")
+            ble_mgr = None
+
+    if not active_slots and not (ble_mgr and ble_mgr.is_alive):
+        print("No controllers connected and BLE not available.")
         sys.exit(1)
 
-    print(f"Headless mode active with {len(active_slots)} controller(s). Press Ctrl+C to stop.")
+    usb_count = sum(1 for s in active_slots if s['type'] == 'usb')
+    ble_status = " BLE scanning..." if (ble_mgr and ble_mgr.is_alive) else ""
+    print(f"Headless mode active with {usb_count} USB controller(s).{ble_status} "
+          f"Press Ctrl+C to stop.")
 
-    # Monitor for disconnects and reconnect
+    # ── Main monitoring loop ───────────────────────────────────────
     while not stop_event.is_set():
-        # Wait for any disconnect event
-        stop_event.wait(timeout=1.0)
+        stop_event.wait(timeout=0.5)
         if stop_event.is_set():
             break
 
-        for slot_info in active_slots:
+        # Process BLE events
+        while True:
+            try:
+                ev = ble_event_queue.get_nowait()
+                _handle_headless_ble_event(ev)
+            except _queue.Empty:
+                break
+
+        # Monitor USB disconnects
+        for slot_info in list(active_slots):
+            if slot_info['type'] != 'usb':
+                continue
+
             disc_event = slot_info['disc_event']
             if not disc_event.is_set():
                 continue
@@ -1173,12 +1606,10 @@ def run_headless(mode_override: str = None):
             if emu_mgr.is_emulating:
                 emu_mgr.stop()
 
-            print(f"[slot {idx + 1}] Controller disconnected — reconnecting...")
+            print(f"[slot {idx + 1}] USB controller disconnected — reconnecting...")
 
-            # Reconnect loop for this slot
-            reconnected = False
+            # USB reconnect loop for this slot
             while not stop_event.is_set():
-                # Build candidates: runtime path, then saved preferred, then any
                 remembered = slot_info['device_path']
                 saved_pref = slot_calibrations[idx].get('preferred_device_path', '')
 
@@ -1186,7 +1617,8 @@ def run_headless(mode_override: str = None):
                 cur_paths = {d['path'] for d in cur_hid}
                 cur_claimed = set()
                 for other in active_slots:
-                    if other['index'] != idx and other['conn_mgr'].device:
+                    if other['index'] != idx and other['type'] == 'usb' \
+                            and other['conn_mgr'] and other['conn_mgr'].device:
                         if other['conn_mgr'].device_path:
                             cur_claimed.add(other['conn_mgr'].device_path)
 
@@ -1211,7 +1643,6 @@ def run_headless(mode_override: str = None):
                             break
 
                 if target_path:
-                    # Re-init USB
                     usb_devs = ConnectionManager.enumerate_usb_devices()
                     for usb_dev in usb_devs:
                         conn_mgr.initialize_via_usb(usb_device=usb_dev)
@@ -1219,7 +1650,7 @@ def run_headless(mode_override: str = None):
                     if conn_mgr.init_hid_device(device_path=target_path):
                         slot_info['device_path'] = target_path
                         input_proc.start()
-                        print(f"[slot {idx + 1}] Reconnected.")
+                        print(f"[slot {idx + 1}] USB reconnected.")
                         if was_emulating:
                             slot_mode = mode_override if mode_override else \
                                 slot_calibrations[idx].get('emulation_mode', mode)
@@ -1230,7 +1661,14 @@ def run_headless(mode_override: str = None):
                                 print(f"[slot {idx + 1}] {mode_label} emulation resumed.")
                             except Exception as e:
                                 print(f"[slot {idx + 1}] Failed to resume emulation: {e}")
-                        reconnected = True
+                        break
+
+                # Also drain BLE events while waiting for USB reconnect
+                while True:
+                    try:
+                        ev = ble_event_queue.get_nowait()
+                        _handle_headless_ble_event(ev)
+                    except _queue.Empty:
                         break
 
                 stop_event.wait(timeout=2.0)
@@ -1239,7 +1677,10 @@ def run_headless(mode_override: str = None):
     for slot_info in active_slots:
         slot_info['input_proc'].stop()
         slot_info['emu_mgr'].stop()
-        slot_info['conn_mgr'].disconnect()
+        if slot_info['type'] == 'usb' and slot_info['conn_mgr']:
+            slot_info['conn_mgr'].disconnect()
+    if ble_mgr:
+        ble_mgr.shutdown()
     print("Done.")
 
 

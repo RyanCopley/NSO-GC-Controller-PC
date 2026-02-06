@@ -77,6 +77,7 @@ class BumbleBackend:
         on_status: Callable[[str], None],
         on_disconnect: Callable[[], None],
         target_address: Optional[str] = None,
+        exclude_addresses: Optional[list[str]] = None,
         scan_timeout: float = 15.0,
         connect_timeout: float = 15.0,
     ) -> Optional[str]:
@@ -88,6 +89,7 @@ class BumbleBackend:
             on_status: Status message callback
             on_disconnect: Callback for unexpected disconnect
             target_address: If set, connect directly to this MAC (skip scan)
+            exclude_addresses: MACs to skip during scanning (other slots' controllers)
             scan_timeout: Seconds to scan before giving up
             connect_timeout: Seconds to wait for connection
 
@@ -102,7 +104,7 @@ class BumbleBackend:
         mac = target_address
         if not mac:
             on_status("Scanning for controller...")
-            mac = await self._scan(scan_timeout)
+            mac = await self._scan(scan_timeout, exclude_addresses)
             if not mac:
                 on_status("No controller found")
                 return None
@@ -225,12 +227,15 @@ class BumbleBackend:
 
         return mac
 
-    async def _scan(self, timeout: float) -> Optional[str]:
+    async def _scan(self, timeout: float,
+                    exclude_addresses: Optional[list[str]] = None,
+                    ) -> Optional[str]:
         """Scan for NSO GC controllers, return first found MAC.
 
         Matches by Nintendo OUI prefix in the MAC address, mirroring
         the PoC's approach of matching by known MAC.
         """
+        exclude = set(exclude_addresses or [])
         found_event = asyncio.Event()
         found_mac = [None]
 
@@ -239,6 +244,12 @@ class BumbleBackend:
                 if found_event.is_set():
                     return
                 addr_str = str(advertisement.address).upper()
+                # Skip controllers that are already connected
+                if addr_str in self._connections:
+                    return
+                # Skip controllers assigned to other slots
+                if addr_str in exclude:
+                    return
                 # Match by Nintendo OUI prefix (same approach as PoC's MAC check)
                 for oui in _NINTENDO_OUIS:
                     if oui in addr_str:

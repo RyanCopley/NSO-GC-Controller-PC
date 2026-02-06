@@ -65,7 +65,8 @@ class PipeQueue:
         raise queue.Empty()
 
 
-async def do_scan_connect(backend, slot_index, target_address):
+async def do_scan_connect(backend, slot_index, target_address,
+                          exclude_addresses=None):
     """Run scan_and_connect as a background asyncio task."""
     pq = PipeQueue(slot_index)
 
@@ -82,6 +83,7 @@ async def do_scan_connect(backend, slot_index, target_address):
             on_status=on_status,
             on_disconnect=on_disconnect,
             target_address=target_address,
+            exclude_addresses=exclude_addresses,
         )
         if mac:
             send({"e": "connected", "s": slot_index, "mac": mac})
@@ -162,7 +164,8 @@ def main():
                 if si in connect_tasks and not connect_tasks[si].done():
                     connect_tasks[si].cancel()
                 connect_tasks[si] = asyncio.create_task(
-                    do_scan_connect(backend, si, cmd.get("target_address")))
+                    do_scan_connect(backend, si, cmd.get("target_address"),
+                                    cmd.get("exclude_addresses")))
 
             elif action == "disconnect":
                 addr = cmd.get("address")
