@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GameCube Controller Enabler - Python/Tkinter Version
+NSO GameCube Controller Pairing App - Python/Tkinter Version
 
 Converts GameCube controllers to work with Steam and other applications.
 Handles USB initialization, HID communication, and Xbox 360 controller emulation.
@@ -65,7 +65,7 @@ if sys.platform in ('darwin', 'linux'):
 
 
 class GCControllerEnabler:
-    """Main application orchestrator for GameCube Controller Enabler"""
+    """Main application orchestrator for NSO GameCube Controller Pairing App"""
 
     def __init__(self):
         import tkinter as tk
@@ -79,7 +79,7 @@ class GCControllerEnabler:
 
         apply_gc_theme()
         self.root = customtkinter.CTk()
-        self.root.title("NSO Game Cube Controller Pairing App")
+        self.root.title("NSO GameCube Controller Pairing App")
         self.root.configure(fg_color="#535486")
         self.root.minsize(720, 540)
 
@@ -1892,7 +1892,7 @@ def run_headless(mode_override: str = None):
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description="GameCube Controller Enabler - "
+        description="NSO GameCube Controller Pairing App - "
                     "converts GC controllers to Xbox 360 for Steam and other apps"
     )
     parser.add_argument(

@@ -1,6 +1,6 @@
 ![Screenshot](images/screenshot.png)
 
-# GameCube Controller Enabler
+# NSO GameCube Controller Pairing App
 
 A cross-platform Python/Tkinter tool that connects Nintendo Switch Online GameCube controllers via USB or Bluetooth and makes them usable on Steam and other platforms through Xbox 360 controller emulation. Supports up to 4 simultaneous controllers.
 
@@ -150,7 +150,7 @@ src/gc_controller/
     bleak_subprocess.py     BLE subprocess for macOS/Windows (no elevated privileges)
     ble_event_loop.py       Asyncio integration helper
 pyproject.toml              Project metadata and dependencies
-GC-Controller-Enabler.spec  PyInstaller spec file
+NSO-GameCube-Controller-Pairing-App.spec  PyInstaller spec file
 build_all.py                Unified build script
 images/
   screenshot.png            Application screenshot

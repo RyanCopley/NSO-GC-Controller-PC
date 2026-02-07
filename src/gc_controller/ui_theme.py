@@ -1,7 +1,7 @@
 """
 UI Theme - GameCube Indigo Purple
 
-Color constants and theme configuration for the GameCube Controller Enabler.
+Color constants and theme configuration for the NSO GameCube Controller Pairing App.
 """
 
 import ctypes

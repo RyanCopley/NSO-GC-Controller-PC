@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "Building GameCube Controller Enabler for Linux..."
+echo "Building NSO GameCube Controller Pairing App for Linux..."
 
 # Check if virtual environment exists
 if [ ! -d ".venv" ]; then

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-NSO GameCube Controller Enabler — a cross-platform Python/Tkinter application that makes Nintendo Switch Online GameCube controllers work as Xbox 360 controllers or Dolphin emulator input via USB or Bluetooth. Supports up to 4 simultaneous controllers with independent calibration.
+NSO GameCube Controller Pairing App — a cross-platform Python/Tkinter application that makes Nintendo Switch Online GameCube controllers work as Xbox 360 controllers or Dolphin emulator input via USB or Bluetooth. Supports up to 4 simultaneous controllers with independent calibration.
 
 ## Build & Run Commands
 

@@ -1,7 +1,7 @@
 """
 Controller UI
 
-All UI widget creation and update methods for the GameCube Controller Enabler.
+All UI widget creation and update methods for the NSO GameCube Controller Pairing App.
 Uses customtkinter for modern rounded widgets and a GameCube purple theme.
 Supports up to 4 controller tabs via CTkTabview.
 """
