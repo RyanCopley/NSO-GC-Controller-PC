@@ -36,7 +36,7 @@ A cross-platform Python/Tkinter tool that connects the [Nintendo Switch Online G
 | Chipset | Tested Adapter | Status |
 |---|---|---|
 | Qualcomm | TP-Link UB500 (USB ID `2357:0604`) | Working |
-| Realtek RTL8761B | MSI onboard (Foxconn, USB ID `0489:e10a`) | Not working |
+| Realtek RTL8761B | MSI onboard (Foxconn, USB ID `0489:e10a`) | Working |
 | Intel | Unknown | Partial (pairing works, reconnection is glitchy) |
 | Broadcom | — | Unknown |
 
@@ -177,6 +177,9 @@ platform/
 - **Windows**: install [ViGEmBus](https://github.com/nefarius/ViGEmBus) and `pip install vgamepad`
 - **Linux**: install evdev (`pip install evdev`), ensure your user is in the `input` group, and install the udev rules
 - **macOS**: Xbox 360 emulation is not supported; use Dolphin pipe mode
+
+### Bluetooth Issues (General)
+- **Multiple Bluetooth adapters**: If your system has more than one Bluetooth adapter (e.g., onboard + USB dongle), you may experience unreliable connections or pairing failures. Disable all but one adapter before using BLE. On Linux, use `hciconfig` to check for multiple adapters and `sudo hciconfig hciX down` to disable extras. On Windows, disable additional adapters in Device Manager under **Bluetooth**.
 
 ### Bluetooth Issues (Linux)
 - BLE requires the Bumble library: `pip install bumble`
