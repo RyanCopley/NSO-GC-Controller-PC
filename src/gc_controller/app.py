@@ -81,7 +81,7 @@ class GCControllerEnabler:
         self.root = customtkinter.CTk()
         self.root.title("NSO Game Cube Controller Pairing App")
         self.root.configure(fg_color="#3B1F6E")
-        self.root.minsize(640, 540)
+        self.root.minsize(720, 540)
 
         # Per-slot calibration dicts
         self.slot_calibrations = [dict(DEFAULT_CALIBRATION) for _ in range(MAX_SLOTS)]
