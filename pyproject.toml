@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "gc-controller"
 version = "1.0.0"
 description = "NSO GameCube Controller Pairing App - Xbox 360 emulation for GC controllers"
-requires-python = ">=3.7"
+requires-python = ">=3.12"
 dependencies = [
     "hidapi>=0.14.0",
     "pyusb>=1.2.1",
