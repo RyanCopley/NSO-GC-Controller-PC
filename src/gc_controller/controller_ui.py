@@ -304,6 +304,13 @@ class ControllerUI:
             bump_val = cal.get(f'trigger_{side}_bump', 190.0)
             s.controller_visual.draw_trigger_bump_line(side, bump_val)
 
+    # ── Calibration mode ─────────────────────────────────────────
+
+    def set_calibration_mode(self, slot_index: int, enabled: bool):
+        """Toggle between graphic view and calibration view for a slot."""
+        s = self.slots[slot_index]
+        s.controller_visual.set_calibration_mode(enabled)
+
     # ── Octagon drawing ───────────────────────────────────────────
 
     def draw_octagon_live(self, slot_index: int, side: str):

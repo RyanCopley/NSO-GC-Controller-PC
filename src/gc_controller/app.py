@@ -1026,10 +1026,12 @@ class GCControllerEnabler:
         if slot.cal_mgr.stick_calibrating:
             slot.cal_mgr.finish_stick_calibration()
             self.ui.redraw_octagons(slot_index)
+            self.ui.set_calibration_mode(slot_index, False)
             sui.stick_cal_btn.configure(text="Calibrate Sticks")
             sui.stick_cal_status.configure(text="Calibration complete!")
             self.ui.mark_slot_dirty(slot_index)
         else:
+            self.ui.set_calibration_mode(slot_index, True)
             slot.cal_mgr.start_stick_calibration()
             sui.stick_cal_btn.configure(text="Finish Calibration")
             sui.stick_cal_status.configure(text="Move sticks to all extremes...")
@@ -1045,7 +1047,7 @@ class GCControllerEnabler:
         if result is not None:
             step, btn_text, status_text = result
             sui.trigger_cal_btn.configure(text=btn_text)
-            sui.trigger_cal_status.configure(text=status_text)
+            self.ui.update_status(slot_index, status_text)
             if step == 0:
                 # Wizard finished — redraw markers
                 self.ui.draw_trigger_markers(slot_index)

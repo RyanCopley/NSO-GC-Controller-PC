@@ -39,6 +39,8 @@ class GCControllerVisual:
     STICK_GATE_RADIUS = 30      # left stick movement range (SVG r=76 scaled)
     CSTICK_GATE_RADIUS = 23     # c-stick movement range (SVG r=59.7 scaled)
     STICK_DOT_RADIUS = 5
+    STICK_IMG_MOVE = 8              # max px offset for left stick image tilt
+    CSTICK_IMG_MOVE = 6             # max px offset for C-stick image tilt
 
     # ── Trigger bar geometry (positioned above controller image) ──────
     TRIGGER_L_X, TRIGGER_L_Y = 45, 2
@@ -78,8 +80,8 @@ class GCControllerVisual:
     # All above-body SVG layer IDs in SVG order (for body composite)
     _BODY_COMPOSITE_LAYERS = [
         'Base', 'char', 'home', 'capture', 'startpause',
-        'lefttoggle', 'dleft', 'ddown', 'dright', 'dup',
-        'C', 'x', 'y', 'B', 'A',
+        'dleft', 'ddown', 'dright', 'dup',
+        'x', 'y', 'B', 'A',
     ]
 
     def __init__(self, parent, **kwargs):
@@ -100,6 +102,8 @@ class GCControllerVisual:
         # Canvas item IDs for under-body layers: normal + pressed
         self._under_normal_items = {}
         self._under_pressed_items = {}
+
+        self._calibrating = False
 
         self._load_images()
         self._create_canvas_items()
@@ -126,6 +130,12 @@ class GCControllerVisual:
             layer_img = Image.open(layer_path).convert('RGBA')
             body = Image.alpha_composite(body, layer_img)
         self._photos['body'] = ImageTk.PhotoImage(body)
+
+        # Stick cap images (separate movable layers)
+        for layer_id in ('lefttoggle', 'C'):
+            path = os.path.join(_ASSETS_DIR, f"{layer_id}.png")
+            self._photos[f'stick_{layer_id}'] = ImageTk.PhotoImage(
+                Image.open(path).convert('RGBA'))
 
         # Above-body layers: load pressed versions only
         for btn_name, layer_id in self._ABOVE_BODY_MAP.items():
@@ -164,7 +174,19 @@ class GCControllerVisual:
             tags='body_img',
         )
 
-        # 3. Pressed overlays for above-body buttons (hidden initially)
+        # 3. Movable stick cap images (shown in normal mode, hidden in calibration)
+        self.canvas.create_image(
+            0, oy, anchor='nw',
+            image=self._photos['stick_lefttoggle'],
+            tags=('lstick_img', 'normal_item'),
+        )
+        self.canvas.create_image(
+            0, oy, anchor='nw',
+            image=self._photos['stick_C'],
+            tags=('cstick_img', 'normal_item'),
+        )
+
+        # 4. Pressed overlays for above-body buttons (hidden initially)
         for btn_name in self._ABOVE_BODY_MAP:
             item = self.canvas.create_image(
                 0, oy, anchor='nw',
@@ -174,10 +196,10 @@ class GCControllerVisual:
             )
             self._pressed_items[btn_name] = item
 
-        # 4. Trigger fill bars (above everything so always visible)
+        # 5. Trigger fill bars (above everything so always visible)
         self._draw_triggers()
 
-        # 5. Stick octagons and dots (topmost layer)
+        # 6. Stick octagons and dots (topmost layer, hidden in normal mode)
         self._draw_sticks()
 
     def _draw_triggers(self):
@@ -214,15 +236,17 @@ class GCControllerVisual:
             ('cstick', self.CSTICK_CX, self.CSTICK_CY,
              self.CSTICK_GATE_RADIUS, T.CSTICK_YELLOW),
         ]:
-            # Default octagon outline
+            # Default octagon outline (hidden in normal mode via cal_item tag)
             self._draw_octagon_shape(tag, cx, cy, gate_r, None)
 
-            # Stick position dot
-            self.canvas.create_oval(
+            # Stick position dot (hidden in normal mode via cal_item tag)
+            item = self.canvas.create_oval(
                 cx - dr, cy - dr, cx + dr, cy + dr,
                 fill=dot_color, outline='',
-                tags=f'{tag}_dot',
+                tags=(f'{tag}_dot', 'cal_item'),
             )
+            if not self._calibrating:
+                self.canvas.itemconfigure(item, state='hidden')
 
     # ── Drawing primitives ────────────────────────────────────────────
 
@@ -265,9 +289,11 @@ class GCControllerVisual:
                 coords.append(cx + math.cos(angle) * radius)
                 coords.append(cy - math.sin(angle) * radius)
 
-        self.canvas.create_polygon(
-            coords, outline=color, fill='', width=2, tags=tag,
+        item = self.canvas.create_polygon(
+            coords, outline=color, fill='', width=2, tags=(tag, 'cal_item'),
         )
+        if not self._calibrating:
+            self.canvas.itemconfigure(item, state='hidden')
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -304,7 +330,7 @@ class GCControllerVisual:
                     self._pressed_items[name], state='normal')
 
     def update_stick_position(self, side: str, x_norm: float, y_norm: float):
-        """Move a stick dot to the given normalized position.
+        """Move a stick dot and stick image to the given normalized position.
 
         Args:
             side: 'left' or 'right' (C-stick).
@@ -318,11 +344,16 @@ class GCControllerVisual:
             cx, cy = self.LSTICK_CX, self.LSTICK_CY
             r = self.STICK_GATE_RADIUS
             dot_tag = 'lstick_dot'
+            img_tag = 'lstick_img'
+            img_move = self.STICK_IMG_MOVE
         else:
             cx, cy = self.CSTICK_CX, self.CSTICK_CY
             r = self.CSTICK_GATE_RADIUS
             dot_tag = 'cstick_dot'
+            img_tag = 'cstick_img'
+            img_move = self.CSTICK_IMG_MOVE
 
+        # Move calibration dot
         dr = self.STICK_DOT_RADIUS
         x_pos = cx + x_norm * r
         y_pos = cy - y_norm * r
@@ -330,6 +361,11 @@ class GCControllerVisual:
         self.canvas.coords(dot_tag,
                            x_pos - dr, y_pos - dr,
                            x_pos + dr, y_pos + dr)
+
+        # Move stick cap image (slight tilt effect)
+        self.canvas.coords(img_tag,
+                           x_norm * img_move,
+                           self.IMG_Y_OFFSET - y_norm * img_move)
 
     def update_trigger_fill(self, side: str, value_0_255: int):
         """Fill trigger bar proportionally.
@@ -432,12 +468,27 @@ class GCControllerVisual:
 
         self.canvas.create_polygon(
             coords, outline=T.STICK_OCTAGON_LIVE, fill='', width=2,
-            tags=live_tag,
+            tags=(live_tag, 'cal_item'),
         )
         self.canvas.tag_raise(f'{tag}_dot')
 
+    def set_calibration_mode(self, enabled: bool):
+        """Toggle between calibration view (octagons/dots) and graphic view (stick images)."""
+        self._calibrating = enabled
+        if enabled:
+            self.canvas.itemconfigure('cal_item', state='normal')
+            self.canvas.itemconfigure('normal_item', state='hidden')
+        else:
+            self.canvas.itemconfigure('cal_item', state='hidden')
+            self.canvas.itemconfigure('normal_item', state='normal')
+
     def reset(self):
         """Reset all elements to default (unpressed, centered sticks, empty triggers)."""
+        # Restore normal (non-calibration) view
+        self._calibrating = False
+        self.canvas.itemconfigure('cal_item', state='hidden')
+        self.canvas.itemconfigure('normal_item', state='normal')
+
         # Reset under-body layers to normal
         for btn_name in self._under_normal_items:
             self.canvas.itemconfigure(
@@ -449,7 +500,7 @@ class GCControllerVisual:
         for btn_name, item_id in self._pressed_items.items():
             self.canvas.itemconfigure(item_id, state='hidden')
 
-        # Center sticks
+        # Center sticks (moves both dots and stick images)
         for side in ('left', 'right'):
             self.update_stick_position(side, 0.0, 0.0)
 
