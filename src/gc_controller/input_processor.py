@@ -90,12 +90,12 @@ class InputProcessor:
                         else:
                             break
                     if latest:
-                        # Log first 10 raw packets on Windows for debugging
-                        if IS_WINDOWS and _dbg_count < 10:
+                        # Log first 30 raw packets on Windows for debugging
+                        if IS_WINDOWS and _dbg_count < 30:
                             import os, pathlib
                             log = pathlib.Path(os.path.expanduser("~/gc_debug.txt"))
                             with open(log, "a") as f:
-                                hexdump = ' '.join(f'{b:02x}' for b in latest[:20])
+                                hexdump = ' '.join(f'{b:02x}' for b in latest[:25])
                                 f.write(f"pkt {_dbg_count} len={len(latest)}: {hexdump}\n")
                             _dbg_count += 1
                         self._process_data(latest)
