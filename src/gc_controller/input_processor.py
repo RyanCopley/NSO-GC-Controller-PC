@@ -30,9 +30,9 @@ def _translate_report_0x05(data) -> list:
         [0]      0x05 report ID
         [1-3]    timer
         [4]      unknown
-        [5]      NSO buttons 0: Y=01 X=02 B=04 A=08 R=10 ZR=20
+        [5]      NSO buttons 0: Y=01 X=02 B=04 A=08 SR=10 SL=20 R=40 ZR=80
         [6]      NSO buttons 1: Plus=02 Home=10 Capture=20
-        [7]      NSO buttons 2: DDown=01 DUp=02 DRight=04 DLeft=08 L=40 ZL=80
+        [7]      NSO buttons 2: DDown=01 DUp=02 DRight=04 DLeft=08 SR=10 SL=20 L=40 ZL=80
         [8-10]   reserved
         [11-16]  sticks (packed 12-bit: LX, LY, RX, RY)
         [17+]    unknown / no analog triggers in uninitialized mode
@@ -53,13 +53,16 @@ def _translate_report_0x05(data) -> list:
     b1_nso = data[6]   # Plus=02 Home=10 Capture=20
     b2_nso = data[7]   # DDown=01 DUp=02 DRight=04 DLeft=08 L=40 ZL=80
 
+    # Standard Switch USB encoding (differs from BLE BlueRetro encoding):
+    #   b0_nso byte: Y=01 X=02 B=04 A=08 SR=10 SL=20 R=40 ZR=80
+    #   b2_nso byte: DDown=01 DUp=02 DRight=04 DLeft=08 SR=10 SL=20 L=40 ZL=80
     b3 = 0
     if b0_nso & 0x04: b3 |= 0x01  # B
     if b0_nso & 0x08: b3 |= 0x02  # A
     if b0_nso & 0x01: b3 |= 0x04  # Y
     if b0_nso & 0x02: b3 |= 0x08  # X
-    if b0_nso & 0x10: b3 |= 0x10  # R
-    if b0_nso & 0x20: b3 |= 0x20  # ZR -> Z
+    if b0_nso & 0x40: b3 |= 0x10  # R
+    if b0_nso & 0x80: b3 |= 0x20  # ZR -> Z
     if b1_nso & 0x02: b3 |= 0x40  # Plus -> Start
     buf[3] = b3
 
@@ -82,10 +85,10 @@ def _translate_report_0x05(data) -> list:
         buf[6 + i] = data[11 + i]
 
     # Triggers: no analog data in uninitialized mode,
-    # synthesize from digital L/ZR buttons.
-    if b2_nso & 0x80:  # ZL
+    # synthesize from digital L/R trigger clicks.
+    if b2_nso & 0x40:  # L digital click -> left trigger
         buf[13] = 255
-    if b0_nso & 0x20:  # ZR -> Z (right trigger)
+    if b0_nso & 0x40:  # R digital click -> right trigger
         buf[14] = 255
 
     return buf
@@ -148,6 +151,7 @@ class InputProcessor:
             if not device:
                 return
             device.set_nonblocking(1)
+            _dbg_count = 0
 
             while self.is_reading and not self._stop_event.is_set():
                 if not device:
@@ -162,6 +166,14 @@ class InputProcessor:
                         else:
                             break
                     if latest:
+                        # DEBUG: dump full report to find analog triggers
+                        if IS_WINDOWS and _dbg_count < 20:
+                            import os, pathlib
+                            log = pathlib.Path(os.path.expanduser("~/gc_debug.txt"))
+                            with open(log, "a") as f:
+                                hexdump = ' '.join(f'{b:02x}' for b in latest)
+                                f.write(f"pkt {_dbg_count}: {hexdump}\n")
+                            _dbg_count += 1
                         if IS_WINDOWS:
                             if latest[0] == 0x05:
                                 # Uninitialized NSO format (no libusb on
