@@ -8,6 +8,8 @@ Protocol (JSON lines):
     {"cmd": "stop_bluez"}
     {"cmd": "open"}
     {"cmd": "scan_connect", "slot_index": 0, "target_address": "..."}
+    {"cmd": "scan_devices", "slot_index": 0}
+    {"cmd": "connect_device", "slot_index": 0, "address": "..."}
     {"cmd": "disconnect", "slot_index": 0, "address": "..."}
     {"cmd": "shutdown"}
 
@@ -19,6 +21,7 @@ Protocol (JSON lines):
     {"e": "status", "s": <slot>, "msg": "..."}
     {"e": "connected", "s": <slot>, "mac": "..."}
     {"e": "connect_error", "s": <slot>, "msg": "..."}
+    {"e": "devices_found", "s": <slot>, "devices": [...]}
     {"e": "data", "s": <slot>, "d": "<base64>"}
     {"e": "disconnected", "s": <slot>}
 """
@@ -64,9 +67,18 @@ class PipeQueue:
         raise queue.Empty()
 
 
+def _normalize_address(addr):
+    """Strip /P or /R suffix from a BLE address."""
+    import re
+    if not addr:
+        return addr
+    return re.sub(r'/[PR]$', '', addr)
+
+
 async def do_scan_connect(backend, slot_index, target_address,
                           exclude_addresses=None, slot_ids=None):
     """Run scan_and_connect as a background asyncio task."""
+    target_address = _normalize_address(target_address)
     pq = PipeQueue(slot_index)
 
     def on_status(msg, _si=slot_index):
@@ -85,6 +97,52 @@ async def do_scan_connect(backend, slot_index, target_address,
             on_disconnect=on_disconnect,
             target_address=target_address,
             exclude_addresses=exclude_addresses,
+        )
+        if identifier:
+            if slot_ids is not None:
+                slot_ids[slot_index] = identifier
+            send({"e": "connected", "s": slot_index, "mac": identifier})
+        else:
+            send({"e": "connect_error", "s": slot_index,
+                  "msg": "Connection failed"})
+    except asyncio.CancelledError:
+        pass
+    except Exception as ex:
+        send({"e": "connect_error", "s": slot_index, "msg": str(ex)})
+
+
+async def do_scan_devices(backend, slot_index):
+    """Run scan_only and send back the list of discovered devices."""
+    try:
+        send({"e": "status", "s": slot_index, "msg": "Scanning for devices..."})
+        devices = await backend.scan_only()
+        send({"e": "devices_found", "s": slot_index, "devices": devices})
+    except asyncio.CancelledError:
+        pass
+    except Exception as ex:
+        send({"e": "connect_error", "s": slot_index, "msg": str(ex)})
+
+
+async def do_connect_device(backend, slot_index, address, slot_ids=None):
+    """Connect to a specific device address from the last scan."""
+    address = _normalize_address(address) or address
+    pq = PipeQueue(slot_index)
+
+    def on_status(msg, _si=slot_index):
+        send({"e": "status", "s": _si, "msg": msg})
+
+    def on_disconnect(_si=slot_index):
+        if slot_ids is not None:
+            slot_ids.pop(_si, None)
+        send({"e": "disconnected", "s": _si})
+
+    try:
+        identifier = await backend.connect_device(
+            address=address,
+            slot_index=slot_index,
+            data_queue=pq,
+            on_status=on_status,
+            on_disconnect=on_disconnect,
         )
         if identifier:
             if slot_ids is not None:
@@ -164,6 +222,21 @@ def main():
                     do_scan_connect(backend, si, cmd.get("target_address"),
                                     cmd.get("exclude_addresses"),
                                     slot_ids=slot_ids))
+
+            elif action == "scan_devices":
+                si = cmd["slot_index"]
+                if si in connect_tasks and not connect_tasks[si].done():
+                    connect_tasks[si].cancel()
+                connect_tasks[si] = asyncio.create_task(
+                    do_scan_devices(backend, si))
+
+            elif action == "connect_device":
+                si = cmd["slot_index"]
+                addr = cmd.get("address", "")
+                if si in connect_tasks and not connect_tasks[si].done():
+                    connect_tasks[si].cancel()
+                connect_tasks[si] = asyncio.create_task(
+                    do_connect_device(backend, si, addr, slot_ids=slot_ids))
 
             elif action == "rumble":
                 si = cmd.get("slot_index")

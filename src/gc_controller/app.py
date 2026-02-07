@@ -42,7 +42,7 @@ from .calibration import CalibrationManager
 from .connection_manager import ConnectionManager
 from .emulation_manager import EmulationManager
 from .input_processor import InputProcessor
-from .controller_slot import ControllerSlot
+from .controller_slot import ControllerSlot, normalize_ble_address
 from .ble.sw2_protocol import build_rumble_packet
 
 # BLE support (optional — only available on Linux with bumble)
@@ -400,6 +400,9 @@ class GCControllerEnabler:
                 self.root.after(
                     3000, lambda _si=si: self._attempt_ble_reconnect(_si))
 
+        elif etype == 'devices_found' and si is not None:
+            self._on_devices_found(si, event.get('devices', []))
+
         elif etype == 'disconnected' and si is not None:
             self._on_ble_disconnect(si)
 
@@ -468,7 +471,12 @@ class GCControllerEnabler:
         return True
 
     def pair_controller(self, slot_index: int):
-        """Start BLE pairing for a controller slot."""
+        """Start BLE pairing for a controller slot.
+
+        Two flows:
+        - Saved address exists: send scan_connect (scan-first with early stop)
+        - No saved address: send scan_devices, show picker, then connect_device
+        """
         slot = self.slots[slot_index]
         sui = self.ui.slots[slot_index]
 
@@ -497,14 +505,54 @@ class GCControllerEnabler:
             except Exception:
                 break
 
-        # Use saved address for direct connect, or None for scan
-        target_addr = slot.ble_address if slot.ble_address else None
+        target_addr = normalize_ble_address(
+            slot.ble_address if slot.ble_address else None)
 
+        if target_addr:
+            # Saved address: scan-first with early stop (fast reconnect)
+            self._ble_pair_mode[slot_index] = 'pair'
+            self._send_ble_cmd({
+                "cmd": "scan_connect",
+                "slot_index": slot_index,
+                "target_address": target_addr,
+            })
+        else:
+            # No saved address: scan for devices and show picker
+            self._ble_pair_mode[slot_index] = 'pair'
+            self._send_ble_cmd({
+                "cmd": "scan_devices",
+                "slot_index": slot_index,
+            })
+
+    def _on_devices_found(self, slot_index: int, devices: list[dict]):
+        """Handle devices_found event: show picker dialog, then connect."""
+        from .controller_ui import BLEDevicePickerDialog
+
+        sui = self.ui.slots[slot_index]
+
+        if not devices:
+            self.ui.update_ble_status(slot_index, "No devices found")
+            if sui.pair_btn:
+                sui.pair_btn.config(state='normal')
+            return
+
+        picker = BLEDevicePickerDialog(self.root, devices)
+        chosen_address = picker.show()
+
+        if not chosen_address:
+            # User cancelled
+            self.ui.update_ble_status(slot_index, "Pairing cancelled")
+            if sui.pair_btn:
+                sui.pair_btn.config(state='normal')
+            return
+
+        # Send connect_device with the chosen address
+        self.ui.update_ble_status(slot_index, "Connecting...")
         self._ble_pair_mode[slot_index] = 'pair'
         self._send_ble_cmd({
-            "cmd": "scan_connect",
+            "cmd": "connect_device",
             "slot_index": slot_index,
-            "target_address": target_addr,
+            "address": chosen_address,
         })
 
     def _on_pair_complete(self, slot_index: int, mac: str | None,

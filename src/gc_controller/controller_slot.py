@@ -6,12 +6,24 @@ Each slot has its own managers, calibration, and device connection.
 """
 
 import queue
+import re
 from typing import Optional
 
 from .calibration import CalibrationManager
 from .connection_manager import ConnectionManager
 from .emulation_manager import EmulationManager
 from .input_processor import InputProcessor
+
+
+def normalize_ble_address(addr: str | None) -> str | None:
+    """Strip /P or /R suffix from a BLE address (Linux Bumble format).
+
+    Bleak (macOS/Windows) doesn't understand these suffixes and will fail
+    to match or connect if they're present.
+    """
+    if not addr:
+        return addr
+    return re.sub(r'/[PR]$', '', addr)
 
 
 class ControllerSlot:
@@ -30,7 +42,8 @@ class ControllerSlot:
 
         # BLE state
         self.connection_mode: str = calibration.get('connection_mode', 'usb')
-        self.ble_address: Optional[str] = calibration.get('preferred_ble_address', '') or None
+        self.ble_address: Optional[str] = normalize_ble_address(
+            calibration.get('preferred_ble_address', '') or None)
         self.ble_data_queue: queue.Queue = queue.Queue(maxsize=64)
         self.ble_connected: bool = False
 

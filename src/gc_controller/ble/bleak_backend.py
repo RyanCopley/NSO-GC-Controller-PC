@@ -11,11 +11,14 @@ No elevated privileges needed.
 
 import asyncio
 import queue
+import re
 import sys
 from typing import Callable, Optional
 
 from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
+from bleak.backends.device import BLEDevice
+from bleak.backends.scanner import AdvertisementData
 
 from .sw2_protocol import (
     LED_MAP, build_led_cmd, translate_ble_native_to_usb,
@@ -51,6 +54,13 @@ def _log(msg: str):
     print(f"[bleak] {msg}", file=sys.stderr, flush=True)
 
 
+def _normalize_address(addr: str | None) -> str | None:
+    """Strip /P or /R suffix from a BLE address (Linux Bumble format)."""
+    if not addr:
+        return addr
+    return re.sub(r'/[PR]$', '', addr)
+
+
 class BleakBackend:
     """Manages BLE connections via Bleak (macOS/Windows).
 
@@ -62,6 +72,7 @@ class BleakBackend:
         self._clients: dict[str, BleakClient] = {}  # identifier -> BleakClient
         self._write_chars: dict[str, object] = {}   # identifier -> handshake char (command writes)
         self._cmd_chars: dict[str, object] = {}     # identifier -> command channel char (for vibration)
+        self._last_scan: dict[str, BLEDevice] = {}  # address -> BLEDevice from last scan_only()
 
     @property
     def is_open(self) -> bool:
@@ -84,89 +95,162 @@ class BleakBackend:
     ) -> Optional[str]:
         """Scan for an NSO GC controller, connect, and init.
 
-        If target_address is set, connects directly to that address.
-        Otherwise, scans all devices and tries each one (strongest signal first),
-        identifying the controller by attempting a handshake write.
+        Uses a scan-first approach with early stop: if target_address is set,
+        the scan stops as soon as that device is seen (fast reconnect).
+        Otherwise scans for the full timeout, then tries each device.
 
         Returns device identifier string on success, None on failure.
         """
-        exclude = set(exclude_addresses or [])
+        target_address = _normalize_address(target_address)
+        exclude = set(_normalize_address(a) or a for a in (exclude_addresses or []))
 
-        if target_address:
-            # Direct connect to known address
-            on_status("Connecting...")
-            result = await self._connect_and_init(
-                target_address, None, slot_index, data_queue,
-                on_status, on_disconnect, connect_timeout)
-            if result:
-                return result
-            # If direct connect fails, fall through to scan
-            _log("Direct connect failed, falling back to scan...")
-
-        # Scan all devices
         on_status("Scanning for controller...")
-        _log(f"Scanning for {scan_timeout}s...")
+        _log(f"Scanning for {scan_timeout}s (target={target_address})...")
 
+        # Collect devices via detection callback for early-stop capability
+        found_devices: dict[str, BLEDevice] = {}
+        found_adv: dict[str, AdvertisementData] = {}
+        target_found = asyncio.Event()
+
+        def _on_detected(device: BLEDevice, adv: AdvertisementData):
+            addr = device.address
+            found_devices[addr] = device
+            found_adv[addr] = adv
+            if target_address and addr.upper() == target_address.upper():
+                target_found.set()
+
+        scanner = BleakScanner(detection_callback=_on_detected)
+        await scanner.start()
         try:
-            discovered = await BleakScanner.discover(
-                timeout=scan_timeout, return_adv=True)
-        except TypeError:
-            # Older Bleak without return_adv
-            raw = await BleakScanner.discover(timeout=scan_timeout)
-            discovered = {d.address: (d, None) for d in raw}
+            if target_address:
+                # Wait until target is found or timeout
+                try:
+                    await asyncio.wait_for(target_found.wait(), timeout=scan_timeout)
+                    _log(f"Target {target_address} found during scan")
+                except asyncio.TimeoutError:
+                    _log(f"Target {target_address} not found in {scan_timeout}s")
+            else:
+                await asyncio.sleep(scan_timeout)
+        finally:
+            await scanner.stop()
 
-        devices = [d for d, _ in discovered.values()]
-        if not devices:
+        if not found_devices:
             on_status("No devices found")
             return None
 
-        _log(f"Found {len(devices)} device(s), trying each...")
+        _log(f"Found {len(found_devices)} device(s), trying each...")
 
-        # Sort: strongest RSSI first, then prefer Nintendo-like names
-        def _sort_key(d):
+        # Build ordered list: target first (if found), then sorted by priority
+        def _sort_key(addr):
+            d = found_devices[addr]
             name = (d.name or "").lower()
-            rssi = -999
-            if d.address in discovered:
-                _, adv = discovered[d.address]
-                if adv is not None and hasattr(adv, 'rssi') and adv.rssi is not None:
-                    rssi = adv.rssi
-            # Check manufacturer data for Nintendo
+            adv = found_adv.get(addr)
+            rssi = adv.rssi if adv and adv.rssi is not None else -999
             is_nintendo = False
-            if d.address in discovered:
-                _, adv = discovered[d.address]
-                if adv is not None:
-                    md = getattr(adv, 'manufacturer_data', {})
-                    if _NINTENDO_COMPANY_ID in md:
-                        is_nintendo = True
+            if adv:
+                md = getattr(adv, 'manufacturer_data', {})
+                if _NINTENDO_COMPANY_ID in md:
+                    is_nintendo = True
             name_match = name == "devicename" or any(
                 p.lower() in name for p in _NINTENDO_NAME_PATTERNS)
             return (
                 0 if is_nintendo else 1,
                 0 if name_match else 1,
                 -rssi,
-                d.address,
+                addr,
             )
 
-        ordered = sorted(devices, key=_sort_key)
+        ordered_addrs = sorted(found_devices.keys(), key=_sort_key)
 
-        for d in ordered:
-            if d.address in exclude:
+        # Move target to front if found
+        if target_address:
+            for addr in ordered_addrs:
+                if addr.upper() == target_address.upper():
+                    ordered_addrs.remove(addr)
+                    ordered_addrs.insert(0, addr)
+                    break
+
+        for addr in ordered_addrs:
+            if addr in exclude:
                 continue
-            if d.address in self._clients:
+            if addr in self._clients:
                 continue
 
+            d = found_devices[addr]
             name = d.name or "(no name)"
-            _log(f"  Trying {name} ({d.address})...")
+            _log(f"  Trying {name} ({addr})...")
             on_status(f"Trying {name}...")
 
             result = await self._connect_and_init(
-                d.address, d, slot_index, data_queue,
+                addr, d, slot_index, data_queue,
                 on_status, on_disconnect, connect_timeout)
             if result:
                 return result
 
         on_status("No controller found")
         return None
+
+    async def scan_only(self, scan_timeout: float = 10.0) -> list[dict]:
+        """Run a full BLE scan and return discovered devices.
+
+        Returns a list of dicts with keys: address, name, rssi.
+        Caches BLEDevice objects in self._last_scan for connect_device().
+        """
+        _log(f"scan_only: scanning for {scan_timeout}s...")
+        found_devices: dict[str, BLEDevice] = {}
+        found_adv: dict[str, AdvertisementData] = {}
+
+        def _on_detected(device: BLEDevice, adv: AdvertisementData):
+            found_devices[device.address] = device
+            found_adv[device.address] = adv
+
+        scanner = BleakScanner(detection_callback=_on_detected)
+        await scanner.start()
+        await asyncio.sleep(scan_timeout)
+        await scanner.stop()
+
+        self._last_scan = dict(found_devices)
+
+        result = []
+        for addr, device in found_devices.items():
+            adv = found_adv.get(addr)
+            rssi = adv.rssi if adv and adv.rssi is not None else -999
+            result.append({
+                'address': addr,
+                'name': device.name or '',
+                'rssi': rssi,
+            })
+
+        _log(f"scan_only: found {len(result)} device(s)")
+        return result
+
+    async def connect_device(
+        self,
+        address: str,
+        slot_index: int,
+        data_queue: queue.Queue,
+        on_status: Callable[[str], None],
+        on_disconnect: Callable[[], None],
+        connect_timeout: float = 15.0,
+    ) -> Optional[str]:
+        """Connect to a specific address using cached BLEDevice from last scan.
+
+        Returns the device address on success, None on failure.
+        """
+        address = _normalize_address(address) or address
+        ble_device = self._last_scan.get(address)
+        if not ble_device:
+            _log(f"connect_device: {address} not in scan cache")
+            on_status(f"Device {address} not found in scan results")
+            return None
+
+        name = ble_device.name or "(no name)"
+        _log(f"connect_device: connecting to {name} ({address})...")
+        on_status(f"Connecting to {name}...")
+
+        return await self._connect_and_init(
+            address, ble_device, slot_index, data_queue,
+            on_status, on_disconnect, connect_timeout)
 
     async def _connect_and_init(
         self,
