@@ -78,6 +78,7 @@ hiddenimports = [
     'tkinter.ttk',
     '_tkinter',
     'PIL._tkinter_finder',
+    'customtkinter',
 ]
 
 # Platform-conditional hidden imports
