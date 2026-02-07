@@ -79,23 +79,8 @@ class BleakBackend:
         return True
 
     async def open(self):
-        """Warm up the OS BLE stack with a brief scan.
-
-        On macOS, CoreBluetooth doesn't start tracking peripherals until the
-        first scan is issued.  Without this, the first real scan_and_connect
-        misses already-advertising devices and falls through to the full
-        timeout.  A 2-second warm-up scan primes the cache so subsequent
-        scans find devices immediately.
-        """
-        _log("open: running warm-up scan...")
-        try:
-            scanner = BleakScanner()
-            await scanner.start()
-            await asyncio.sleep(2.0)
-            await scanner.stop()
-            _log("open: warm-up scan complete")
-        except Exception as e:
-            _log(f"open: warm-up scan failed (non-fatal): {e}")
+        """No-op — the OS BLE stack is always available in userspace."""
+        pass
 
     async def scan_and_connect(
         self,
@@ -122,17 +107,20 @@ class BleakBackend:
         on_status("Scanning for controller...")
         _log(f"Scanning for {scan_timeout}s (target={target_address})...")
 
-        # Collect devices via detection callback for early-stop capability
+        # Collect devices via detection callback for early-stop capability.
+        # The callback may be invoked from a CoreBluetooth thread (macOS),
+        # so we must use call_soon_threadsafe to signal the asyncio.Event.
         found_devices: dict[str, BLEDevice] = {}
         found_adv: dict[str, AdvertisementData] = {}
         target_found = asyncio.Event()
+        loop = asyncio.get_running_loop()
 
         def _on_detected(device: BLEDevice, adv: AdvertisementData):
             addr = device.address
             found_devices[addr] = device
             found_adv[addr] = adv
             if target_address and addr.upper() == target_address.upper():
-                target_found.set()
+                loop.call_soon_threadsafe(target_found.set)
 
         scanner = BleakScanner(detection_callback=_on_detected)
         await scanner.start()
