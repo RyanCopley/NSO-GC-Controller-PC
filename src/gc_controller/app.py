@@ -272,7 +272,7 @@ class GCControllerEnabler:
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=None,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1,
             )
