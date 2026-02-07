@@ -33,8 +33,8 @@ class GCControllerVisual:
     IMG_Y_OFFSET = 24           # shift controller images down to make room
 
     # ── Stick geometry (SVG coords scaled to canvas: factor ≈ 0.39) ──
-    LSTICK_CX, LSTICK_CY = 99, 139 + 24
-    CSTICK_CX, CSTICK_CY = 347, 259 + 24
+    LSTICK_CX, LSTICK_CY = 97, 140 + 24
+    CSTICK_CX, CSTICK_CY = 345, 260 + 24
 
     STICK_GATE_RADIUS = 30      # left stick movement range (SVG r=76 scaled)
     CSTICK_GATE_RADIUS = 23     # c-stick movement range (SVG r=59.7 scaled)
@@ -236,7 +236,21 @@ class GCControllerVisual:
             ('cstick', self.CSTICK_CX, self.CSTICK_CY,
              self.CSTICK_GATE_RADIUS, T.CSTICK_YELLOW),
         ]:
-            # Default octagon outline (hidden in normal mode via cal_item tag)
+            # Reference 100% octagon (dashed, shows max range in calibration)
+            ref_coords = []
+            for i in range(8):
+                angle = math.radians(i * 45)
+                ref_coords.append(cx + math.cos(angle) * gate_r)
+                ref_coords.append(cy - math.sin(angle) * gate_r)
+            ref_item = self.canvas.create_polygon(
+                ref_coords, outline=T.STICK_OCTAGON, fill='',
+                width=1, dash=(4, 4),
+                tags=(f'{tag}_ref', 'cal_item'),
+            )
+            if not self._calibrating:
+                self.canvas.itemconfigure(ref_item, state='hidden')
+
+            # Calibrated octagon outline (hidden in normal mode via cal_item tag)
             self._draw_octagon_shape(tag, cx, cy, gate_r, None)
 
             # Stick position dot (hidden in normal mode via cal_item tag)
@@ -476,6 +490,9 @@ class GCControllerVisual:
         """Toggle between calibration view (octagons/dots) and graphic view (stick images)."""
         self._calibrating = enabled
         if enabled:
+            # Remove stale calibration octagons so only reference + dot show
+            self.canvas.delete('lstick_octagon')
+            self.canvas.delete('cstick_octagon')
             self.canvas.itemconfigure('cal_item', state='normal')
             self.canvas.itemconfigure('normal_item', state='hidden')
         else:

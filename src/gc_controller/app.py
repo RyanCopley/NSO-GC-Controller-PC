@@ -1025,7 +1025,6 @@ class GCControllerEnabler:
 
         if slot.cal_mgr.stick_calibrating:
             slot.cal_mgr.finish_stick_calibration()
-            self.ui.redraw_octagons(slot_index)
             self.ui.set_calibration_mode(slot_index, False)
             sui.stick_cal_btn.configure(text="Calibrate Sticks")
             sui.stick_cal_status.configure(text="Calibration complete!")
