@@ -6,6 +6,7 @@ calibration tracking, emulation updates, and UI update scheduling.
 """
 
 import queue
+import sys
 import time
 import threading
 from typing import Callable, Optional
@@ -13,6 +14,85 @@ from typing import Callable, Optional
 from .controller_constants import BUTTONS, normalize
 from .calibration import CalibrationManager
 from .emulation_manager import EmulationManager
+
+IS_WINDOWS = sys.platform == 'win32'
+
+
+def _translate_report_0x05(data) -> list:
+    """Translate Windows uninitialized report (ID 0x05) to GC USB format.
+
+    On Windows, pyusb/libusb is typically unavailable, so the USB init
+    commands that switch the controller to the proprietary GC format are
+    never sent.  The controller stays in its default NSO report format
+    (report ID 0x05) which has NSO-encoded buttons and different offsets.
+
+    0x05 raw layout (64 bytes, report ID prepended by Windows HIDAPI):
+        [0]      0x05 report ID
+        [1-3]    timer
+        [4]      unknown
+        [5]      NSO buttons 0: Y=01 X=02 B=04 A=08 SR=10 SL=20 R=40 ZR=80
+        [6]      NSO buttons 1: Plus=02 Home=10 Capture=20
+        [7]      NSO buttons 2: DDown=01 DUp=02 DRight=04 DLeft=08 SR=10 SL=20 L=40 ZL=80
+        [8-10]   reserved
+        [11-16]  sticks (packed 12-bit: LX, LY, RX, RY)
+        [17-60]  IMU / unknown
+        [61]     left trigger analog (~0x1e rest, ~0xe9 fully pressed)
+        [62]     right trigger analog (~0x24 rest, ~0xf0 fully pressed)
+
+    Target GC USB format (what _process_data expects):
+        [3]      B=01 A=02 Y=04 X=08 R=10 Z=20 Start=40
+        [4]      DDown=01 DRight=02 DLeft=04 DUp=08 L=10 ZL=20
+        [5]      Home=01 Capture=02 GR=04 GL=08 Chat=10
+        [6-11]   sticks (same packed 12-bit format)
+        [13]     left trigger
+        [14]     right trigger
+    """
+    buf = [0] * 64
+
+    # Buttons: remap NSO encoding -> GC encoding
+    # (same remapping as translate_ble_native_to_usb for 0x30 format)
+    b0_nso = data[5]   # Y=01 X=02 B=04 A=08 R=10 ZR=20
+    b1_nso = data[6]   # Plus=02 Home=10 Capture=20
+    b2_nso = data[7]   # DDown=01 DUp=02 DRight=04 DLeft=08 L=40 ZL=80
+
+    # Standard Switch USB encoding (differs from BLE BlueRetro encoding):
+    #   b0_nso byte: Y=01 X=02 B=04 A=08 SR=10 SL=20 R=40 ZR=80
+    #   b2_nso byte: DDown=01 DUp=02 DRight=04 DLeft=08 SR=10 SL=20 L=40 ZL=80
+    b3 = 0
+    if b0_nso & 0x04: b3 |= 0x01  # B
+    if b0_nso & 0x08: b3 |= 0x02  # A
+    if b0_nso & 0x01: b3 |= 0x04  # Y
+    if b0_nso & 0x02: b3 |= 0x08  # X
+    if b0_nso & 0x40: b3 |= 0x10  # R
+    if b0_nso & 0x80: b3 |= 0x20  # ZR -> Z
+    if b1_nso & 0x02: b3 |= 0x40  # Plus -> Start
+    buf[3] = b3
+
+    b4 = 0
+    if b2_nso & 0x01: b4 |= 0x01  # DDown
+    if b2_nso & 0x04: b4 |= 0x02  # DRight
+    if b2_nso & 0x08: b4 |= 0x04  # DLeft
+    if b2_nso & 0x02: b4 |= 0x08  # DUp
+    if b2_nso & 0x40: b4 |= 0x10  # L
+    if b2_nso & 0x80: b4 |= 0x20  # ZL
+    buf[4] = b4
+
+    b5 = 0
+    if b1_nso & 0x10: b5 |= 0x01  # Home
+    if b1_nso & 0x20: b5 |= 0x02  # Capture
+    if b1_nso & 0x40: b5 |= 0x10  # Chat
+    buf[5] = b5
+
+    # Sticks: raw bytes 11-16 -> GC bytes 6-11
+    for i in range(6):
+        buf[6 + i] = data[11 + i]
+
+    # Analog triggers: bytes 61-62 in the 0x05 report
+    if len(data) > 62:
+        buf[13] = data[61]  # left trigger analog
+        buf[14] = data[62]  # right trigger analog
+
+    return buf
 
 
 class InputProcessor:
@@ -72,7 +152,6 @@ class InputProcessor:
             if not device:
                 return
             device.set_nonblocking(1)
-
             while self.is_reading and not self._stop_event.is_set():
                 if not device:
                     break
@@ -86,6 +165,15 @@ class InputProcessor:
                         else:
                             break
                     if latest:
+                        if IS_WINDOWS:
+                            if latest[0] == 0x05:
+                                # Uninitialized NSO format (no libusb on
+                                # Windows → USB init commands never sent).
+                                latest = _translate_report_0x05(latest)
+                            else:
+                                # Initialized GC format with report ID
+                                # prepended by Windows HIDAPI — strip it.
+                                latest = latest[1:]
                         self._process_data(latest)
                     else:
                         time.sleep(0.004)
