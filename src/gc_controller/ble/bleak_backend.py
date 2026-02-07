@@ -107,30 +107,30 @@ class BleakBackend:
         on_status("Scanning for controller...")
         _log(f"Scanning for {scan_timeout}s (target={target_address})...")
 
-        # Collect devices via detection callback for early-stop capability.
-        # The callback may be invoked from a CoreBluetooth thread (macOS),
-        # so we must use call_soon_threadsafe to signal the asyncio.Event.
+        # Collect devices via detection callback.  For early-stop we poll
+        # found_devices instead of signalling an asyncio.Event — Bleak's
+        # callback threading varies across platforms and the Event approach
+        # is unreliable on macOS.
         found_devices: dict[str, BLEDevice] = {}
         found_adv: dict[str, AdvertisementData] = {}
-        target_found = asyncio.Event()
-        loop = asyncio.get_running_loop()
 
         def _on_detected(device: BLEDevice, adv: AdvertisementData):
-            addr = device.address
-            found_devices[addr] = device
-            found_adv[addr] = adv
-            if target_address and addr.upper() == target_address.upper():
-                loop.call_soon_threadsafe(target_found.set)
+            found_devices[device.address] = device
+            found_adv[device.address] = adv
 
         scanner = BleakScanner(detection_callback=_on_detected)
         await scanner.start()
         try:
             if target_address:
-                # Wait until target is found or timeout
-                try:
-                    await asyncio.wait_for(target_found.wait(), timeout=scan_timeout)
-                    _log(f"Target {target_address} found during scan")
-                except asyncio.TimeoutError:
+                # Poll every 0.3s for the target instead of sleeping the full timeout
+                target_upper = target_address.upper()
+                deadline = asyncio.get_event_loop().time() + scan_timeout
+                while asyncio.get_event_loop().time() < deadline:
+                    if any(a.upper() == target_upper for a in found_devices):
+                        _log(f"Target {target_address} found during scan")
+                        break
+                    await asyncio.sleep(0.3)
+                else:
                     _log(f"Target {target_address} not found in {scan_timeout}s")
             else:
                 await asyncio.sleep(scan_timeout)
