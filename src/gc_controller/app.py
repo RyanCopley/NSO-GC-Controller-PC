@@ -189,6 +189,8 @@ class GCControllerEnabler:
         slot.input_proc.start()
 
         sui.connect_btn.configure(text="Disconnect USB")
+        if sui.pair_btn:
+            sui.pair_btn.configure(state='disabled')
         self.ui.update_tab_status(slot_index, connected=True, emulating=False)
         self.toggle_emulation(slot_index)
 
@@ -226,6 +228,8 @@ class GCControllerEnabler:
         slot.device_path = None
 
         sui.connect_btn.configure(text="Connect USB")
+        if sui.pair_btn:
+            sui.pair_btn.configure(state='normal')
         self.ui.update_status(slot_index, "Disconnected")
         self.ui.reset_slot_ui(slot_index)
         self.ui.update_tab_status(slot_index, connected=False, emulating=False)
@@ -554,7 +558,8 @@ class GCControllerEnabler:
             slot.input_proc.start(mode='ble')
 
             if sui.pair_btn:
-                sui.pair_btn.configure(text="Disconnect BLE", state='normal')
+                sui.pair_btn.configure(text="Disconnect", state='normal')
+            sui.connect_btn.configure(state='disabled')
             self.ui.update_ble_status(slot_index, f"Connected: {mac}")
             self.ui.update_status(slot_index, "Connected via BLE")
             self.ui.update_tab_status(slot_index, connected=True, emulating=False)
@@ -593,6 +598,7 @@ class GCControllerEnabler:
 
         if sui.pair_btn:
             sui.pair_btn.configure(text="Pair Controller", state='normal')
+        sui.connect_btn.configure(state='normal')
         self.ui.update_status(slot_index, "Disconnected")
         self.ui.reset_slot_ui(slot_index)
         self.ui.update_tab_status(slot_index, connected=False, emulating=False)
@@ -631,6 +637,7 @@ class GCControllerEnabler:
             if self.ui.slots[slot_index].pair_btn:
                 self.ui.slots[slot_index].pair_btn.configure(
                     text="Pair Controller", state='normal')
+            self.ui.slots[slot_index].connect_btn.configure(state='normal')
             self.ui.update_tab_status(slot_index, connected=False, emulating=False)
             return
 
@@ -667,7 +674,8 @@ class GCControllerEnabler:
 
         sui = self.ui.slots[slot_index]
         if sui.pair_btn:
-            sui.pair_btn.configure(text="Disconnect BLE", state='normal')
+            sui.pair_btn.configure(text="Disconnect", state='normal')
+        sui.connect_btn.configure(state='disabled')
         self.ui.update_status(slot_index, "Reconnected via BLE")
         self.ui.update_ble_status(slot_index, f"Connected: {mac}")
         self.ui.update_tab_status(slot_index, connected=True, emulating=False)
@@ -712,6 +720,8 @@ class GCControllerEnabler:
                     slot.device_path = pref_bytes
                     slot.input_proc.start()
                     sui.connect_btn.configure(text="Disconnect USB")
+                    if sui.pair_btn:
+                        sui.pair_btn.configure(state='disabled')
                     self.ui.update_tab_status(i, connected=True, emulating=False)
                     self.toggle_emulation(i)
 
@@ -736,6 +746,8 @@ class GCControllerEnabler:
                 slot.device_path = path
                 slot.input_proc.start()
                 sui.connect_btn.configure(text="Disconnect USB")
+                if sui.pair_btn:
+                    sui.pair_btn.configure(state='disabled')
                 self.ui.update_tab_status(i, connected=True, emulating=False)
                 self.toggle_emulation(i)
 
@@ -760,6 +772,8 @@ class GCControllerEnabler:
 
         self.ui.update_status(slot_index, "Controller disconnected — reconnecting...")
         sui.connect_btn.configure(text="Connect USB")
+        if sui.pair_btn:
+            sui.pair_btn.configure(state='normal')
         self.ui.update_tab_status(slot_index, connected=False, emulating=False)
 
         self._attempt_reconnect(slot_index)
@@ -817,6 +831,8 @@ class GCControllerEnabler:
                 slot.device_path = target_path
                 slot.input_proc.start()
                 sui.connect_btn.configure(text="Disconnect USB")
+                if sui.pair_btn:
+                    sui.pair_btn.configure(state='disabled')
                 self.ui.update_status(slot_index, "Reconnected")
                 self.ui.update_tab_status(slot_index, connected=True, emulating=False)
 

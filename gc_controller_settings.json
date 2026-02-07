@@ -110,7 +110,7 @@
       "stick_right_range_y": 2048,
       "preferred_device_path": "",
       "connection_mode": "ble",
-      "preferred_ble_address": "3C:A9:AB:60:24:BF/P",
+      "preferred_ble_address": "3C:A9:AB:60:24:BF",
       "stick_left_octagon": null,
       "stick_right_octagon": null
     },
