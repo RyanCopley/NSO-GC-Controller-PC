@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "Building GameCube Controller Enabler for macOS..."
+echo "Building NSO GameCube Controller Pairing App for macOS..."
 
 # Check if virtual environment exists
 if [ ! -d ".venv" ]; then

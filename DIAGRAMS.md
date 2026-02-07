@@ -1,4 +1,4 @@
-# NSO GameCube Controller Enabler — Architecture Diagrams
+# NSO GameCube Controller Pairing App — Architecture Diagrams
 
 ## High-Level Architecture
 

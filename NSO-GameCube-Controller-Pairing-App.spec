@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='GC-Controller-Enabler',
+    name='NSO-GameCube-Controller-Pairing-App',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

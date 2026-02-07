@@ -142,7 +142,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='GC-Controller-Enabler',
+    name='NSO-GameCube-Controller-Pairing-App',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -162,9 +162,9 @@ exe = EXE(
 if sys.platform == "darwin":
     app = BUNDLE(
         exe,
-        name='GC-Controller-Enabler.app',
+        name='NSO-GameCube-Controller-Pairing-App.app',
         icon=icon_file if icon_file and os.path.exists(icon_file) else None,
-        bundle_identifier='com.gccontroller.enabler',
+        bundle_identifier='com.nso.gamecube-controller-pairing-app',
         info_plist={
             'NSPrincipalClass': 'NSApplication',
             'NSAppleScriptEnabled': False,

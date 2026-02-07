@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cross-platform build script for GameCube Controller Enabler
+Cross-platform build script for NSO GameCube Controller Pairing App
 Automatically detects the platform and builds the appropriate executable
 """
 
@@ -73,7 +73,7 @@ def build_with_pyinstaller(output_dir):
         "python", "-m", "PyInstaller",
         "--onefile",
         "--windowed" if platform.system() != "Linux" else "",
-        "--name", "GC-Controller-Enabler",
+        "--name", "NSO-GameCube-Controller-Pairing-App",
         "--distpath", output_dir,
         "--paths", "src",
         "src/gc_controller/__main__.py"
@@ -131,7 +131,7 @@ def check_dependencies():
 
 def main():
     """Main build function"""
-    print("GameCube Controller Enabler - Build Script")
+    print("NSO GameCube Controller Pairing App - Build Script")
     print("=" * 50)
     
     # Change to script directory

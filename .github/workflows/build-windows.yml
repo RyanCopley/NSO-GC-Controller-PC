@@ -26,5 +26,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: GC-Controller-Enabler-Windows
-          path: dist/GC-Controller-Enabler.exe
+          name: NSO-GameCube-Controller-Pairing-App-Windows
+          path: dist/NSO-GameCube-Controller-Pairing-App.exe
