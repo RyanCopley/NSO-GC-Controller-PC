@@ -20,11 +20,16 @@ IS_MACOS = sys.platform == "darwin"
 class ConnectionManager:
     """Manages USB initialization and HID connection."""
 
+    # Standard Switch rumble data (4 bytes per motor)
+    _RUMBLE_ON = bytes([0x28, 0x88, 0x60, 0x61])
+    _RUMBLE_OFF = bytes([0x00, 0x01, 0x40, 0x40])
+
     def __init__(self, on_status: Callable[[str], None], on_progress: Callable[[int], None]):
         self._on_status = on_status
         self._on_progress = on_progress
         self.device: Optional[hid.device] = None
         self.device_path: Optional[bytes] = None
+        self._rumble_counter = 0
 
     @staticmethod
     def enumerate_devices() -> List[dict]:
@@ -180,10 +185,15 @@ class ConnectionManager:
         except Exception:
             pass
 
-        # Fallback: HIDAPI write (Windows — no pyusb/libusb)
+        # Fallback: standard Switch rumble via HIDAPI (Windows — no pyusb)
+        # The controller is in uninitialized mode (0x05 reports) which is
+        # standard Switch format, so it accepts output report 0x10 (rumble).
         if self.device:
             try:
-                self.device.write(b'\x00' + cmd)
+                rumble = self._RUMBLE_ON if state else self._RUMBLE_OFF
+                packet = bytes([0x10, self._rumble_counter & 0x0F]) + rumble + rumble
+                self._rumble_counter = (self._rumble_counter + 1) & 0x0F
+                self.device.write(packet)
                 return True
             except Exception:
                 pass
