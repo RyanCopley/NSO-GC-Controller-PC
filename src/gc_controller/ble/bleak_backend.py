@@ -367,18 +367,12 @@ class BleakBackend:
         self._clients[address] = client
         self._write_chars[address] = handshake_char
 
-        # Identify the command channel and input characteristic.
+        # Identify the command channel for vibration commands.
         # The Nintendo SW2 service has 3 WriteNoResp characteristics:
         #   1st (lowest handle): Vibration/rumble output (0x0012)
         #   2nd: Command channel (0x0014) — accepts SW2 commands like 0x0A
         #   3rd (highest handle): Command + rumble prefix (0x0016)
-        # It also has 2 Notify characteristics:
-        #   1st (lowest handle): Input reports (0x000A) — 63-byte controller data
-        #   2nd: Command responses (0x001A) — must NOT be mixed with input
-        # Subscribing _on_input to all notify chars causes rumble command
-        # responses (from 0x001A) to be misinterpreted as joystick data,
-        # corrupting both sticks on Windows while rumble is active.
-        input_char = None
+        # Find the service with ≥3 WriteNoResp chars, take the 2nd by handle.
         for svc in client.services:
             wnr = sorted(
                 [c for c in svc.characteristics
@@ -387,14 +381,6 @@ class BleakBackend:
             if len(wnr) >= 3:
                 self._cmd_chars[address] = wnr[1]
                 _log(f"  Command channel: 0x{wnr[1].handle:04X} {wnr[1].uuid}")
-                # Input characteristic = lowest-handle notify in SW2 service
-                svc_notify = sorted(
-                    [c for c in svc.characteristics
-                     if "notify" in (getattr(c, "properties", []) or [])],
-                    key=lambda c: c.handle)
-                if svc_notify:
-                    input_char = svc_notify[0]
-                    _log(f"  Input channel: 0x{input_char.handle:04X} {input_char.uuid}")
                 break
 
         if disconnected.is_set():
@@ -403,18 +389,18 @@ class BleakBackend:
             self._cmd_chars.pop(address, None)
             return None
 
-        # Subscribe to all notify characteristics, but filter in the callback
-        # so that only input reports reach the data queue.  Command response
-        # notifications (handle 0x001A) triggered by rumble writes would
-        # otherwise be misinterpreted as joystick data, corrupting both sticks.
+        # Subscribe to all notify characteristics
         on_status("Subscribing to input...")
 
         _report_count = [0]
-        _input_handle = input_char.handle if input_char else None
 
         def _on_input(char: BleakGATTCharacteristic, value: bytearray):
-            if _input_handle is not None and char.handle != _input_handle:
-                return  # ignore non-input notifications (e.g. command responses)
+            # Ignore non-input notifications (e.g. command responses triggered
+            # by rumble writes).  BLE input reports are 63 bytes; command
+            # responses are shorter and would be misinterpreted as joystick
+            # data, corrupting both sticks while rumble is active.
+            if len(value) < 30:
+                return
             if _report_count[0] < 3:
                 _report_count[0] += 1
                 _log(f"  Report #{_report_count[0]}: len={len(value)} first16={list(value[:16])}")
