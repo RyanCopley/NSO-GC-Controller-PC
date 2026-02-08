@@ -403,12 +403,18 @@ class BleakBackend:
             self._cmd_chars.pop(address, None)
             return None
 
-        # Subscribe to the input notification characteristic only.
+        # Subscribe to all notify characteristics, but filter in the callback
+        # so that only input reports reach the data queue.  Command response
+        # notifications (handle 0x001A) triggered by rumble writes would
+        # otherwise be misinterpreted as joystick data, corrupting both sticks.
         on_status("Subscribing to input...")
 
         _report_count = [0]
+        _input_handle = input_char.handle if input_char else None
 
         def _on_input(char: BleakGATTCharacteristic, value: bytearray):
+            if _input_handle is not None and char.handle != _input_handle:
+                return  # ignore non-input notifications (e.g. command responses)
             if _report_count[0] < 3:
                 _report_count[0] += 1
                 _log(f"  Report #{_report_count[0]}: len={len(value)} first16={list(value[:16])}")
@@ -417,21 +423,12 @@ class BleakBackend:
             except queue.Full:
                 pass
 
-        if input_char:
+        for char in notify_chars:
             try:
-                await client.start_notify(input_char.uuid, _on_input)
-                _log(f"  Subscribed to input: {input_char.uuid}")
+                await client.start_notify(char.uuid, _on_input)
+                _log(f"  Subscribed to {char.uuid}")
             except Exception as e:
-                _log(f"  Failed to subscribe to input {input_char.uuid}: {e}")
-        else:
-            # Fallback for non-SW2 devices: subscribe to all notify chars
-            _log(f"  SW2 service not identified, subscribing to all notify chars")
-            for char in notify_chars:
-                try:
-                    await client.start_notify(char.uuid, _on_input)
-                    _log(f"  Subscribed to {char.uuid}")
-                except Exception as e:
-                    _log(f"  Failed to subscribe to {char.uuid}: {e}")
+                _log(f"  Failed to subscribe to {char.uuid}: {e}")
 
         # Send init commands (from nso-gc-bridge approach).
         # SW2 protocol commands (like LED set) must go to the command channel
