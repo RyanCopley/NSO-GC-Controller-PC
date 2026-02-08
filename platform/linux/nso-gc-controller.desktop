@@ -6,3 +6,4 @@ Icon=nso-gc-controller
 Terminal=false
 Type=Application
 Categories=Game;Utility;
+StartupWMClass=nso-gc-controller

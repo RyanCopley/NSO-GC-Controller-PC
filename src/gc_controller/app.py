@@ -78,7 +78,7 @@ class GCControllerEnabler:
         self._messagebox = messagebox
 
         apply_gc_theme()
-        self.root = customtkinter.CTk()
+        self.root = customtkinter.CTk(className='nso-gc-controller')
         self.root.title("NSO GameCube Controller Pairing App")
         self.root.configure(fg_color="#535486")
         self.root.minsize(720, 540)
