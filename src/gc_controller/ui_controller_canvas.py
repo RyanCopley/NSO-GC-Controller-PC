@@ -99,6 +99,7 @@ class GCControllerVisual:
         self._btn_states = {}           # button_name → bool
         self._lstick_pos = (0.0, 0.0)   # normalized (x, y)
         self._cstick_pos = (0.0, 0.0)
+        self._dirty = False             # True when composite needs rebuild
 
         self._load_pil_images()
         self._create_canvas_items()
@@ -325,7 +326,9 @@ class GCControllerVisual:
         Args:
             button_states: dict mapping button name → bool (pressed).
         """
-        self._btn_states = button_states
+        if button_states != self._btn_states:
+            self._btn_states = button_states
+            self._dirty = True
 
     def update_stick_position(self, side: str, x_norm: float, y_norm: float):
         """Update stick position state. Call flush() after all updates.
@@ -339,9 +342,13 @@ class GCControllerVisual:
         y_norm = max(-1.0, min(1.0, y_norm))
 
         if side == 'left':
-            self._lstick_pos = (x_norm, y_norm)
+            if self._lstick_pos != (x_norm, y_norm):
+                self._lstick_pos = (x_norm, y_norm)
+                self._dirty = True
         else:
-            self._cstick_pos = (x_norm, y_norm)
+            if self._cstick_pos != (x_norm, y_norm):
+                self._cstick_pos = (x_norm, y_norm)
+                self._dirty = True
 
         # Update calibration dot position (lightweight canvas oval)
         if side == 'left':
@@ -383,8 +390,10 @@ class GCControllerVisual:
                            bx + 2 + fill_w, by + th - 2)
 
     def flush(self):
-        """Re-composite and display. Call once after batching all updates."""
-        self._refresh_display()
+        """Re-composite and display if anything changed since last flush."""
+        if self._dirty:
+            self._dirty = False
+            self._refresh_display()
 
     def draw_trigger_bump_line(self, side: str, bump_raw: float):
         """Draw a vertical marker line on the trigger bar at the bump threshold.

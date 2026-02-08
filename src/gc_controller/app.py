@@ -115,8 +115,10 @@ class GCControllerEnabler:
             )
             self.slots.append(slot)
 
-        # Per-slot pending UI update coalescing (after-ID per slot)
-        self._pending_ui = [None] * MAX_SLOTS
+        # Per-slot latest UI data — written by input threads, read by poll timer.
+        # No Tk interaction from background threads; the main-thread timer
+        # reads these at a fixed rate (~30 fps) so updates are naturally coalesced.
+        self._latest_ui_data = [None] * MAX_SLOTS
 
         # BLE state (lazy-initialized on first pair via privileged subprocess)
         self._ble_available = is_ble_available()
@@ -145,6 +147,9 @@ class GCControllerEnabler:
         # Now that UI is built, draw initial trigger markers for all slots
         for i in range(MAX_SLOTS):
             self.ui.draw_trigger_markers(i)
+
+        # Start fixed-rate UI poll timer (reads input data at ~30 fps)
+        self._start_ui_poll()
 
         # Handle window closing
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -1119,28 +1124,33 @@ class GCControllerEnabler:
     def _schedule_ui_update(self, slot_index: int, left_x, left_y, right_x, right_y,
                             left_trigger, right_trigger, button_states,
                             stick_calibrating):
-        """Schedule a UI update from the input thread for a specific slot.
+        """Store latest UI data from the input thread (no Tk calls).
 
-        Coalesces rapid updates: if a previous update for this slot hasn't
-        been processed yet, cancel it and replace with the latest data.
+        The main-thread poll timer (_ui_poll) picks this up at ~30 fps.
         """
-        prev = self._pending_ui[slot_index]
-        if prev is not None:
-            try:
-                self.root.after_cancel(prev)
-            except (ValueError, Exception):
-                pass
-
-        self._pending_ui[slot_index] = self.root.after(0, lambda: self._apply_ui_update(
-            slot_index, left_x, left_y, right_x, right_y,
+        self._latest_ui_data[slot_index] = (
+            left_x, left_y, right_x, right_y,
             left_trigger, right_trigger, button_states,
-            stick_calibrating))
+            stick_calibrating,
+        )
+
+    def _start_ui_poll(self):
+        """Start the fixed-rate UI poll timer (~30 fps)."""
+        self._ui_poll()
+
+    def _ui_poll(self):
+        """Main-thread timer: apply latest input data for each slot."""
+        for slot_index in range(MAX_SLOTS):
+            data = self._latest_ui_data[slot_index]
+            if data is not None:
+                self._latest_ui_data[slot_index] = None
+                self._apply_ui_update(slot_index, *data)
+        self.root.after(33, self._ui_poll)   # ~30 fps
 
     def _apply_ui_update(self, slot_index: int, left_x, left_y, right_x, right_y,
                          left_trigger, right_trigger, button_states,
                          stick_calibrating):
         """Apply UI updates on the main thread for a specific slot."""
-        self._pending_ui[slot_index] = None
         try:
             self.ui.update_stick_position(slot_index, 'left', left_x, left_y)
             self.ui.update_stick_position(slot_index, 'right', right_x, right_y)
