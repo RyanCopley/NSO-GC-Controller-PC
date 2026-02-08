@@ -1,9 +1,10 @@
 """
 UI Controller Canvas - GameCube Controller Visual
 
-Draws a GameCube controller using pre-rendered PNG layers from the SVG source.
-Button presses are shown by swapping to lightened overlay images.
-Sticks and triggers are drawn as canvas overlays on top of the images.
+All PNG layers are composited in PIL (fast C code) into a single image.
+Only ONE PhotoImage sits on the canvas, plus lightweight geometric items
+for triggers and calibration overlays.  This avoids the ~20 stacked
+transparent-PNG canvas items that caused severe lag on Windows GDI.
 """
 
 import math
@@ -26,7 +27,7 @@ else:
 
 
 class GCControllerVisual:
-    """Draws and manages a GameCube controller visual using pre-rendered PNG layers."""
+    """Draws and manages a GameCube controller visual using PIL compositing."""
 
     CANVAS_W = 520
     CANVAS_H = 396              # 372 image + 24px headroom for trigger bars
@@ -50,7 +51,6 @@ class GCControllerVisual:
 
     # ── Button name → SVG layer ID for pressed overlays ───────────────
     # Layers rendered BELOW the body in the SVG (body occludes parts of them).
-    # These need separate normal + pressed images swapped underneath the body.
     _UNDER_BODY_MAP = {
         'R':  'R',
         'Z':  'Z',
@@ -61,7 +61,6 @@ class GCControllerVisual:
     _UNDER_BODY_ORDER = ['R', 'Z', 'L', 'ZL']
 
     # Layers ON or ABOVE the body in the SVG.
-    # Pressed overlays sit above the body image.
     _ABOVE_BODY_MAP = {
         'A':           'A',
         'B':           'B',
@@ -94,112 +93,110 @@ class GCControllerVisual:
             **kwargs,
         )
 
-        # Keep references to PhotoImage objects to prevent GC
-        self._photos = {}
-        self._pressed_photos = {}
-        # Canvas item IDs for pressed overlays (above-body buttons)
-        self._pressed_items = {}
-        # Canvas item IDs for under-body layers: normal + pressed
-        self._under_normal_items = {}
-        self._under_pressed_items = {}
-
         self._calibrating = False
 
-        self._load_images()
+        # Current visual state
+        self._btn_states = {}           # button_name → bool
+        self._lstick_pos = (0.0, 0.0)   # normalized (x, y)
+        self._cstick_pos = (0.0, 0.0)
+
+        self._load_pil_images()
         self._create_canvas_items()
 
     # ── Image loading ────────────────────────────────────────────────
 
-    def _load_images(self):
-        """Load all layer images from the assets directory."""
-        # Under-body layers: load both normal and pressed
+    def _load_pil_images(self):
+        """Load all layer images as PIL Image objects for compositing."""
+        # Under-body layers: normal and pressed (PIL images)
+        self._pil_under_normal = {}
+        self._pil_under_pressed = {}
         for btn_name, layer_id in self._UNDER_BODY_MAP.items():
-            normal_path = os.path.join(_ASSETS_DIR, f"{layer_id}.png")
-            pressed_path = os.path.join(_ASSETS_DIR, f"{layer_id}_pressed.png")
-            self._photos[f'{btn_name}_normal'] = ImageTk.PhotoImage(
-                Image.open(normal_path))
-            self._pressed_photos[btn_name] = ImageTk.PhotoImage(
-                Image.open(pressed_path))
+            self._pil_under_normal[btn_name] = Image.open(
+                os.path.join(_ASSETS_DIR, f"{layer_id}.png")).convert('RGBA')
+            self._pil_under_pressed[btn_name] = Image.open(
+                os.path.join(_ASSETS_DIR, f"{layer_id}_pressed.png")).convert('RGBA')
 
-        # Body composite: alpha-composite all on/above-body layers
-        # Use the actual PNG dimensions (not canvas, which includes headroom)
+        # Body composite: alpha-composite all on/above-body layers once
         first_layer = Image.open(os.path.join(_ASSETS_DIR, "Base.png"))
-        body = Image.new('RGBA', first_layer.size, (0, 0, 0, 0))
+        self._img_size = first_layer.size
+        body = Image.new('RGBA', self._img_size, (0, 0, 0, 0))
         for layer_id in self._BODY_COMPOSITE_LAYERS:
-            layer_path = os.path.join(_ASSETS_DIR, f"{layer_id}.png")
-            layer_img = Image.open(layer_path).convert('RGBA')
+            layer_img = Image.open(
+                os.path.join(_ASSETS_DIR, f"{layer_id}.png")).convert('RGBA')
             body = Image.alpha_composite(body, layer_img)
-        self._photos['body'] = ImageTk.PhotoImage(body)
+        self._body_pil = body
 
-        # Stick cap images (separate movable layers)
+        # Stick cap images
+        self._pil_sticks = {}
         for layer_id in ('lefttoggle', 'C'):
-            path = os.path.join(_ASSETS_DIR, f"{layer_id}.png")
-            self._photos[f'stick_{layer_id}'] = ImageTk.PhotoImage(
-                Image.open(path).convert('RGBA'))
+            self._pil_sticks[layer_id] = Image.open(
+                os.path.join(_ASSETS_DIR, f"{layer_id}.png")).convert('RGBA')
 
-        # Above-body layers: load pressed versions only
+        # Above-body pressed overlays
+        self._pil_above_pressed = {}
         for btn_name, layer_id in self._ABOVE_BODY_MAP.items():
-            pressed_path = os.path.join(_ASSETS_DIR, f"{layer_id}_pressed.png")
-            self._pressed_photos[btn_name] = ImageTk.PhotoImage(
-                Image.open(pressed_path))
+            self._pil_above_pressed[btn_name] = Image.open(
+                os.path.join(_ASSETS_DIR, f"{layer_id}_pressed.png")).convert('RGBA')
+
+        # Pre-composite the idle frame (no buttons pressed, sticks centered)
+        self._idle_frame = self._composite_frame({}, (0, 0), (0, 0))
+
+    def _composite_frame(self, btn_states, lstick_px, cstick_px):
+        """Build a complete controller image from current state via PIL.
+
+        Args:
+            btn_states: dict of button_name → bool (pressed).
+            lstick_px: (dx, dy) pixel offset for left stick cap.
+            cstick_px: (dx, dy) pixel offset for c-stick cap.
+        """
+        img = Image.new('RGBA', self._img_size, (0, 0, 0, 0))
+
+        # 1. Under-body layers (normal or pressed)
+        for btn_name in self._UNDER_BODY_ORDER:
+            if btn_states.get(btn_name):
+                img = Image.alpha_composite(img, self._pil_under_pressed[btn_name])
+            else:
+                img = Image.alpha_composite(img, self._pil_under_normal[btn_name])
+
+        # 2. Body composite
+        img = Image.alpha_composite(img, self._body_pil)
+
+        # 3. Stick caps (shifted if stick is tilted)
+        for stick_id, offset in [('lefttoggle', lstick_px), ('C', cstick_px)]:
+            stick = self._pil_sticks[stick_id]
+            if not self._calibrating:
+                dx, dy = offset
+                if dx == 0 and dy == 0:
+                    img = Image.alpha_composite(img, stick)
+                else:
+                    shifted = Image.new('RGBA', self._img_size, (0, 0, 0, 0))
+                    shifted.paste(stick, (dx, dy), stick)
+                    img = Image.alpha_composite(img, shifted)
+
+        # 4. Above-body pressed overlays
+        for btn_name in self._ABOVE_BODY_MAP:
+            if btn_states.get(btn_name):
+                img = Image.alpha_composite(img, self._pil_above_pressed[btn_name])
+
+        return img
 
     # ── Canvas item creation ────────────────────────────────────────
-    # Z-order: under-body (normal+pressed) → body → above-body overlays
-    #          → triggers → sticks
+    # Only ONE image item + lightweight geometric overlays.
 
     def _create_canvas_items(self):
-        """Create all canvas items in the correct layer order."""
-        # 1. Under-body layers (L, R, Z, ZL) — normal shown, pressed hidden
-        #    The body image will occlude the parts that should be hidden.
-        oy = self.IMG_Y_OFFSET
-        for btn_name in self._UNDER_BODY_ORDER:
-            normal_item = self.canvas.create_image(
-                0, oy, anchor='nw',
-                image=self._photos[f'{btn_name}_normal'],
-                tags=f'under_{btn_name}_normal',
-            )
-            pressed_item = self.canvas.create_image(
-                0, oy, anchor='nw',
-                image=self._pressed_photos[btn_name],
-                state='hidden',
-                tags=f'under_{btn_name}_pressed',
-            )
-            self._under_normal_items[btn_name] = normal_item
-            self._under_pressed_items[btn_name] = pressed_item
-
-        # 2. Body composite (Base + all on-body elements, occludes shoulders)
-        self.canvas.create_image(
-            0, oy, anchor='nw',
-            image=self._photos['body'],
-            tags='body_img',
+        """Create canvas items: single composited image + geometric overlays."""
+        # 1. Single composited controller image
+        self._display_photo = ImageTk.PhotoImage(self._idle_frame)
+        self._display_item = self.canvas.create_image(
+            0, self.IMG_Y_OFFSET, anchor='nw',
+            image=self._display_photo,
+            tags='controller_img',
         )
 
-        # 3. Movable stick cap images (shown in normal mode, hidden in calibration)
-        self.canvas.create_image(
-            0, oy, anchor='nw',
-            image=self._photos['stick_lefttoggle'],
-            tags=('lstick_img', 'normal_item'),
-        )
-        self.canvas.create_image(
-            0, oy, anchor='nw',
-            image=self._photos['stick_C'],
-            tags=('cstick_img', 'normal_item'),
-        )
-
-        # 4. Pressed overlays for above-body buttons (hidden initially)
-        for btn_name in self._ABOVE_BODY_MAP:
-            item = self.canvas.create_image(
-                0, oy, anchor='nw',
-                image=self._pressed_photos[btn_name],
-                state='hidden',
-                tags=f'pressed_{btn_name}',
-            )
-            self._pressed_items[btn_name] = item
-
-        # 5. Trigger fill bars (above everything so always visible)
+        # 2. Trigger fill bars (lightweight canvas rectangles)
         self._draw_triggers()
 
-        # 6. Stick octagons and dots (topmost layer, hidden in normal mode)
+        # 3. Calibration octagons and dots (hidden in normal mode)
         self._draw_sticks()
 
     def _draw_triggers(self):
@@ -309,42 +306,29 @@ class GCControllerVisual:
         if not self._calibrating:
             self.canvas.itemconfigure(item, state='hidden')
 
+    # ── Internal rendering ───────────────────────────────────────────
+
+    def _refresh_display(self):
+        """Re-composite all layers and update the single canvas image."""
+        lstick_px = (round(self._lstick_pos[0] * self.STICK_IMG_MOVE),
+                     round(-self._lstick_pos[1] * self.STICK_IMG_MOVE))
+        cstick_px = (round(self._cstick_pos[0] * self.CSTICK_IMG_MOVE),
+                     round(-self._cstick_pos[1] * self.CSTICK_IMG_MOVE))
+        frame = self._composite_frame(self._btn_states, lstick_px, cstick_px)
+        self._display_photo.paste(frame)
+
     # ── Public API ────────────────────────────────────────────────────
 
     def update_button_states(self, button_states: dict):
-        """Show/hide pressed button overlays.
+        """Update pressed button state. Call flush() after all updates.
 
         Args:
             button_states: dict mapping button name → bool (pressed).
         """
-        # Reset under-body layers: show normal, hide pressed
-        for btn_name in self._under_normal_items:
-            self.canvas.itemconfigure(
-                self._under_normal_items[btn_name], state='normal')
-            self.canvas.itemconfigure(
-                self._under_pressed_items[btn_name], state='hidden')
-
-        # Reset above-body overlays
-        for btn_name, item_id in self._pressed_items.items():
-            self.canvas.itemconfigure(item_id, state='hidden')
-
-        # Apply pressed states
-        for name, is_pressed in button_states.items():
-            if not is_pressed:
-                continue
-            # Under-body buttons: swap normal→hidden, pressed→visible
-            if name in self._under_normal_items:
-                self.canvas.itemconfigure(
-                    self._under_normal_items[name], state='hidden')
-                self.canvas.itemconfigure(
-                    self._under_pressed_items[name], state='normal')
-            # Above-body buttons: show pressed overlay
-            elif name in self._pressed_items:
-                self.canvas.itemconfigure(
-                    self._pressed_items[name], state='normal')
+        self._btn_states = button_states
 
     def update_stick_position(self, side: str, x_norm: float, y_norm: float):
-        """Move a stick dot and stick image to the given normalized position.
+        """Update stick position state. Call flush() after all updates.
 
         Args:
             side: 'left' or 'right' (C-stick).
@@ -355,31 +339,26 @@ class GCControllerVisual:
         y_norm = max(-1.0, min(1.0, y_norm))
 
         if side == 'left':
+            self._lstick_pos = (x_norm, y_norm)
+        else:
+            self._cstick_pos = (x_norm, y_norm)
+
+        # Update calibration dot position (lightweight canvas oval)
+        if side == 'left':
             cx, cy = self.LSTICK_CX, self.LSTICK_CY
             r = self.STICK_GATE_RADIUS
             dot_tag = 'lstick_dot'
-            img_tag = 'lstick_img'
-            img_move = self.STICK_IMG_MOVE
         else:
             cx, cy = self.CSTICK_CX, self.CSTICK_CY
             r = self.CSTICK_GATE_RADIUS
             dot_tag = 'cstick_dot'
-            img_tag = 'cstick_img'
-            img_move = self.CSTICK_IMG_MOVE
 
-        # Move calibration dot
         dr = self.STICK_DOT_RADIUS
         x_pos = cx + x_norm * r
         y_pos = cy - y_norm * r
-
         self.canvas.coords(dot_tag,
                            x_pos - dr, y_pos - dr,
                            x_pos + dr, y_pos + dr)
-
-        # Move stick cap image (slight tilt effect)
-        self.canvas.coords(img_tag,
-                           x_norm * img_move,
-                           self.IMG_Y_OFFSET - y_norm * img_move)
 
     def update_trigger_fill(self, side: str, value_0_255: int):
         """Fill trigger bar proportionally.
@@ -402,6 +381,10 @@ class GCControllerVisual:
         self.canvas.coords(tag,
                            bx + 2, by + 2,
                            bx + 2 + fill_w, by + th - 2)
+
+    def flush(self):
+        """Re-composite and display. Call once after batching all updates."""
+        self._refresh_display()
 
     def draw_trigger_bump_line(self, side: str, bump_raw: float):
         """Draw a vertical marker line on the trigger bar at the bump threshold.
@@ -494,30 +477,25 @@ class GCControllerVisual:
             self.canvas.delete('lstick_octagon')
             self.canvas.delete('cstick_octagon')
             self.canvas.itemconfigure('cal_item', state='normal')
-            self.canvas.itemconfigure('normal_item', state='hidden')
         else:
             self.canvas.itemconfigure('cal_item', state='hidden')
-            self.canvas.itemconfigure('normal_item', state='normal')
+        # Re-render (sticks hidden/shown in calibration mode)
+        self._refresh_display()
 
     def reset(self):
         """Reset all elements to default (unpressed, centered sticks, empty triggers)."""
-        # Restore normal (non-calibration) view
         self._calibrating = False
         self.canvas.itemconfigure('cal_item', state='hidden')
-        self.canvas.itemconfigure('normal_item', state='normal')
 
-        # Reset under-body layers to normal
-        for btn_name in self._under_normal_items:
-            self.canvas.itemconfigure(
-                self._under_normal_items[btn_name], state='normal')
-            self.canvas.itemconfigure(
-                self._under_pressed_items[btn_name], state='hidden')
+        # Reset visual state
+        self._btn_states = {}
+        self._lstick_pos = (0.0, 0.0)
+        self._cstick_pos = (0.0, 0.0)
 
-        # Hide above-body pressed overlays
-        for btn_name, item_id in self._pressed_items.items():
-            self.canvas.itemconfigure(item_id, state='hidden')
+        # Re-render with idle frame
+        self._display_photo.paste(self._idle_frame)
 
-        # Center sticks (moves both dots and stick images)
+        # Center calibration dots
         for side in ('left', 'right'):
             self.update_stick_position(side, 0.0, 0.0)
 
