@@ -367,12 +367,18 @@ class BleakBackend:
         self._clients[address] = client
         self._write_chars[address] = handshake_char
 
-        # Identify the command channel for vibration commands.
+        # Identify the command channel and input characteristic.
         # The Nintendo SW2 service has 3 WriteNoResp characteristics:
         #   1st (lowest handle): Vibration/rumble output (0x0012)
         #   2nd: Command channel (0x0014) — accepts SW2 commands like 0x0A
         #   3rd (highest handle): Command + rumble prefix (0x0016)
-        # Find the service with ≥3 WriteNoResp chars, take the 2nd by handle.
+        # It also has 2 Notify characteristics:
+        #   1st (lowest handle): Input reports (0x000A) — 63-byte controller data
+        #   2nd: Command responses (0x001A) — must NOT be mixed with input
+        # Subscribing _on_input to all notify chars causes rumble command
+        # responses (from 0x001A) to be misinterpreted as joystick data,
+        # corrupting both sticks on Windows while rumble is active.
+        input_char = None
         for svc in client.services:
             wnr = sorted(
                 [c for c in svc.characteristics
@@ -381,6 +387,14 @@ class BleakBackend:
             if len(wnr) >= 3:
                 self._cmd_chars[address] = wnr[1]
                 _log(f"  Command channel: 0x{wnr[1].handle:04X} {wnr[1].uuid}")
+                # Input characteristic = lowest-handle notify in SW2 service
+                svc_notify = sorted(
+                    [c for c in svc.characteristics
+                     if "notify" in (getattr(c, "properties", []) or [])],
+                    key=lambda c: c.handle)
+                if svc_notify:
+                    input_char = svc_notify[0]
+                    _log(f"  Input channel: 0x{input_char.handle:04X} {input_char.uuid}")
                 break
 
         if disconnected.is_set():
@@ -389,7 +403,7 @@ class BleakBackend:
             self._cmd_chars.pop(address, None)
             return None
 
-        # Subscribe to all notify characteristics
+        # Subscribe to the input notification characteristic only.
         on_status("Subscribing to input...")
 
         _report_count = [0]
@@ -403,12 +417,21 @@ class BleakBackend:
             except queue.Full:
                 pass
 
-        for char in notify_chars:
+        if input_char:
             try:
-                await client.start_notify(char.uuid, _on_input)
-                _log(f"  Subscribed to {char.uuid}")
+                await client.start_notify(input_char.uuid, _on_input)
+                _log(f"  Subscribed to input: {input_char.uuid}")
             except Exception as e:
-                _log(f"  Failed to subscribe to {char.uuid}: {e}")
+                _log(f"  Failed to subscribe to input {input_char.uuid}: {e}")
+        else:
+            # Fallback for non-SW2 devices: subscribe to all notify chars
+            _log(f"  SW2 service not identified, subscribing to all notify chars")
+            for char in notify_chars:
+                try:
+                    await client.start_notify(char.uuid, _on_input)
+                    _log(f"  Subscribed to {char.uuid}")
+                except Exception as e:
+                    _log(f"  Failed to subscribe to {char.uuid}: {e}")
 
         # Send init commands (from nso-gc-bridge approach).
         # SW2 protocol commands (like LED set) must go to the command channel
