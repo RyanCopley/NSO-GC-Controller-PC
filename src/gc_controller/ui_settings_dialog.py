@@ -38,7 +38,8 @@ class SettingsDialog:
                  is_any_emulating: Callable[[], bool],
                  is_any_connected: Callable[[], bool] = lambda: False,
                  on_save: Optional[Callable] = None,
-                 on_forget_ble: Optional[Callable] = None):
+                 get_known_ble_devices: Optional[Callable] = None,
+                 on_forget_ble_device: Optional[Callable] = None):
         self._parent = parent
         self._emu_mode_var = emu_mode_var
         self._trigger_mode_var = trigger_mode_var
@@ -49,7 +50,8 @@ class SettingsDialog:
         self._is_any_emulating = is_any_emulating
         self._is_any_connected = is_any_connected
         self._on_save = on_save
-        self._on_forget_ble = on_forget_ble
+        self._get_known_ble_devices = get_known_ble_devices
+        self._on_forget_ble_device = on_forget_ble_device
 
         self._dlg = customtkinter.CTkToplevel(parent)
         self._dlg.title("Settings")
@@ -200,17 +202,20 @@ class SettingsDialog:
         )
         self._rumble_btn.pack(anchor=tk.W, pady=4)
 
-        # ── Forget Wireless Devices ──
-        if self._on_forget_ble:
-            customtkinter.CTkButton(
-                right, text="Forget Wireless Devices",
-                command=self._on_forget_ble_click,
-                fg_color="#463F6F",
-                hover_color="#5A5190",
-                text_color=T.TEXT_PRIMARY,
-                corner_radius=12, height=36, width=220,
-                font=(T.FONT_FAMILY, 14),
-            ).pack(anchor=tk.W, pady=4)
+        # ── Paired Controllers ──
+        if self._get_known_ble_devices is not None:
+            sep_ble = customtkinter.CTkFrame(right, fg_color="#463F6F", height=2)
+            sep_ble.pack(fill=tk.X, pady=(12, 8))
+
+            customtkinter.CTkLabel(
+                right, text="Paired Controllers",
+                text_color=T.TEXT_PRIMARY, font=(T.FONT_FAMILY, 16, "bold"),
+            ).pack(anchor=tk.W, pady=(0, 4))
+
+            self._device_list_frame = customtkinter.CTkFrame(
+                right, fg_color="transparent")
+            self._device_list_frame.pack(anchor=tk.W, fill=tk.X)
+            self._build_device_list()
 
         # ── About / Credits ──
         sep2 = customtkinter.CTkFrame(right, fg_color="#463F6F", height=2)
@@ -267,9 +272,66 @@ class SettingsDialog:
         # grab_set after window is visible to avoid TclError
         self._dlg.after(10, self._dlg.grab_set)
 
-    def _on_forget_ble_click(self):
-        if self._on_forget_ble:
-            self._on_forget_ble()
+    def _build_device_list(self):
+        """Rebuild the paired controllers list."""
+        for widget in self._device_list_frame.winfo_children():
+            widget.destroy()
+
+        devices = self._get_known_ble_devices()
+        if not devices:
+            customtkinter.CTkLabel(
+                self._device_list_frame, text="No paired controllers",
+                text_color=T.TEXT_SECONDARY, font=(T.FONT_FAMILY, 13),
+            ).pack(anchor=tk.W, padx=4, pady=2)
+            return
+
+        muted_btn = dict(
+            fg_color="#463F6F",
+            hover_color="#5A5190",
+            text_color=T.TEXT_PRIMARY,
+            corner_radius=8, height=28, width=70,
+            font=(T.FONT_FAMILY, 12),
+        )
+
+        for mac in devices:
+            row = customtkinter.CTkFrame(
+                self._device_list_frame, fg_color="transparent")
+            row.pack(anchor=tk.W, fill=tk.X, pady=1)
+
+            customtkinter.CTkLabel(
+                row, text=mac,
+                text_color=T.TEXT_SECONDARY, font=(T.FONT_FAMILY, 13),
+            ).pack(side=tk.LEFT, padx=(4, 8))
+
+            customtkinter.CTkButton(
+                row, text="Forget",
+                command=lambda m=mac: self._forget_device(m),
+                **muted_btn,
+            ).pack(side=tk.LEFT)
+
+        if len(devices) >= 2:
+            customtkinter.CTkButton(
+                self._device_list_frame, text="Forget All",
+                command=self._forget_all_devices,
+                fg_color="#463F6F",
+                hover_color="#5A5190",
+                text_color=T.TEXT_PRIMARY,
+                corner_radius=8, height=28, width=220,
+                font=(T.FONT_FAMILY, 12),
+            ).pack(anchor=tk.W, pady=(6, 0))
+
+    def _forget_device(self, mac: str):
+        """Forget a single paired controller and refresh the list."""
+        if self._on_forget_ble_device:
+            self._on_forget_ble_device(mac)
+            self._build_device_list()
+
+    def _forget_all_devices(self):
+        """Forget all paired controllers and refresh the list."""
+        if self._on_forget_ble_device and self._get_known_ble_devices:
+            for mac in list(self._get_known_ble_devices().keys()):
+                self._on_forget_ble_device(mac)
+            self._build_device_list()
 
     def _on_save_click(self):
         if self._on_save:

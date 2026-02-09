@@ -38,10 +38,7 @@ class SlotUI:
 
 
         # Calibration
-        self.stick_cal_btn = None
-        self.stick_cal_status = None
-        self.trigger_cal_btn = None
-        self.trigger_cal_status = None
+        self.cal_wizard_btn = None
 
 
 class ControllerUI:
@@ -51,14 +48,14 @@ class ControllerUI:
                  slot_calibrations: List[dict],
                  slot_cal_mgrs: List[CalibrationManager],
                  on_connect: Callable[[int], None],
-                 on_stick_cal: Callable[[int], None],
-                 on_trigger_cal: Callable[[int], None],
+                 on_cal_wizard: Callable[[int], None],
                  on_save: Callable,
                  on_pair: Optional[Callable[[int], None]] = None,
                  on_emulate_all: Optional[Callable] = None,
                  on_test_rumble_all: Optional[Callable] = None,
                  ble_available: bool = False,
-                 on_forget_ble: Optional[Callable] = None,
+                 get_known_ble_devices: Optional[Callable] = None,
+                 on_forget_ble_device: Optional[Callable] = None,
                  on_auto_save: Optional[Callable] = None):
         self._root = root
         self._slot_calibrations = slot_calibrations
@@ -82,7 +79,8 @@ class ControllerUI:
         self._on_emulate_all = on_emulate_all
         self._on_test_rumble_all = on_test_rumble_all
         self._on_save = on_save
-        self._on_forget_ble = on_forget_ble
+        self._get_known_ble_devices = get_known_ble_devices
+        self._on_forget_ble_device = on_forget_ble_device
         self._on_auto_save = on_auto_save
 
         self._slot_connected: List[bool] = [False] * MAX_SLOTS
@@ -96,15 +94,13 @@ class ControllerUI:
         self._tab_names: List[str] = []
 
         self.slots: List[SlotUI] = []
-        self._setup(on_connect, on_stick_cal, on_trigger_cal, on_save,
-                    on_pair)
+        self._setup(on_connect, on_cal_wizard, on_save, on_pair)
 
         self._initializing = False
 
     # ── Setup ────────────────────────────────────────────────────────
 
-    def _setup(self, on_connect, on_stick_cal, on_trigger_cal, on_save,
-               on_pair=None):
+    def _setup(self, on_connect, on_cal_wizard, on_save, on_pair=None):
         """Create the user interface with tabview tabs."""
         outer_frame = customtkinter.CTkFrame(self._root, fg_color="transparent")
         outer_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
@@ -143,13 +139,6 @@ class ControllerUI:
         icon_frame.place(relx=1.0, y=0, anchor="ne")
 
         customtkinter.CTkButton(
-            icon_frame, text="\U0001F5AB",
-            command=on_save,
-            width=40, height=40, font=("", 24),
-            **icon_base,
-        ).pack(side=tk.LEFT, padx=(0, 4))
-
-        customtkinter.CTkButton(
             icon_frame, text="\u2699",
             command=self.open_settings,
             width=40, height=40, font=("", 24),
@@ -163,7 +152,7 @@ class ControllerUI:
 
             slot_ui = SlotUI()
             self._build_tab(i, slot_ui, on_connect,
-                            on_stick_cal, on_trigger_cal, on_pair)
+                            on_cal_wizard, on_pair)
             self.slots.append(slot_ui)
 
         # Track global setting changes — auto-save when changed
@@ -176,7 +165,7 @@ class ControllerUI:
         self.minimize_to_tray_var.trace_add('write', _on_setting_changed)
 
     def _build_tab(self, index: int, slot_ui: SlotUI,
-                   on_connect, on_stick_cal, on_trigger_cal,
+                   on_connect, on_cal_wizard,
                    on_pair=None):
         """Build one controller tab."""
         tab_name = self._tab_names[index]
@@ -238,27 +227,12 @@ class ControllerUI:
             )
             slot_ui.pair_btn.pack(side=tk.LEFT, padx=4, expand=True, fill=tk.X)
 
-        slot_ui.stick_cal_btn = customtkinter.CTkButton(
-            btn_frame, text="Calibrate Sticks",
-            command=lambda i=index: on_stick_cal(i),
+        slot_ui.cal_wizard_btn = customtkinter.CTkButton(
+            btn_frame, text="Calibration Wizard",
+            command=lambda i=index: on_cal_wizard(i),
             **btn_kwargs,
         )
-        slot_ui.stick_cal_btn.pack(side=tk.LEFT, padx=4, expand=True, fill=tk.X)
-
-        slot_ui.trigger_cal_btn = customtkinter.CTkButton(
-            btn_frame, text="Calibrate Triggers",
-            command=lambda i=index: on_trigger_cal(i),
-            **btn_kwargs,
-        )
-        slot_ui.trigger_cal_btn.pack(side=tk.LEFT, padx=(4, 0), expand=True, fill=tk.X)
-
-        # Hidden status labels for calibration feedback
-        slot_ui.stick_cal_status = customtkinter.CTkLabel(
-            btn_frame, text="", text_color=T.TEXT_DIM, font=(T.FONT_FAMILY, 12),
-        )
-        slot_ui.trigger_cal_status = customtkinter.CTkLabel(
-            btn_frame, text="", text_color=T.TEXT_DIM, font=(T.FONT_FAMILY, 12),
-        )
+        slot_ui.cal_wizard_btn.pack(side=tk.LEFT, padx=(4, 0), expand=True, fill=tk.X)
 
         # Configure grid weights
         tab.grid_columnconfigure(0, weight=1)
@@ -279,7 +253,8 @@ class ControllerUI:
             is_any_emulating=lambda: any(self._slot_emulating),
             is_any_connected=lambda: any(self._slot_connected),
             on_save=self._on_save,
-            on_forget_ble=self._on_forget_ble,
+            get_known_ble_devices=self._get_known_ble_devices,
+            on_forget_ble_device=self._on_forget_ble_device,
         )
 
     # ── UI update methods ────────────────────────────────────────────

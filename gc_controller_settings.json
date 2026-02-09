@@ -1,389 +1,95 @@
 {
   "version": 3,
   "global": {
-    "trigger_bump_100_percent": false,
-    "emulation_mode": "xbox360",
-    "auto_connect": false,
-    "minimize_to_tray": true,
     "known_ble_devices": {
-      "3C:A9:AB:60:24:BF/P": {
-        "stick_left_octagon": [
-          [
-            1.0,
-            0.008
-          ],
-          [
-            0.7630293159609121,
-            0.7456
-          ],
-          [
-            0.08469055374592833,
-            0.9944
-          ],
-          [
-            -0.752442996742671,
-            0.712
-          ],
-          [
-            -1.0,
-            -0.0184
-          ],
-          [
-            -0.7728013029315961,
-            -0.7176
-          ],
-          [
-            -0.04560260586319218,
-            -1.0
-          ],
-          [
-            0.7312703583061889,
-            -0.7488
-          ]
-        ],
-        "stick_left_range_y": 1250.0,
-        "stick_right_center_y": 2110.5,
-        "stick_right_range_x": 1120.5,
-        "trigger_right_max": 233.0,
-        "trigger_left_max": 228.0,
-        "stick_left_center_x": 2114.0,
-        "stick_right_octagon": [
-          [
-            1.0,
-            -0.023798832510103278
-          ],
-          [
-            0.7599286033020973,
-            0.7144140098787607
-          ],
-          [
-            0.015618027666220438,
-            1.0
-          ],
-          [
-            -0.7376171352074966,
-            0.7063313875168388
-          ],
-          [
-            -1.0,
-            0.02918724741805119
-          ],
-          [
-            -0.7349397590361446,
-            -0.7063313875168388
-          ],
-          [
-            0.08433734939759036,
-            -0.9982038616973506
-          ],
-          [
-            0.7947344935296743,
-            -0.7431522227211496
-          ]
-        ],
-        "stick_right_center_x": 2140.5,
-        "stick_left_center_y": 2052.0,
-        "stick_right_range_y": 1113.5,
-        "trigger_left_base": 32.0,
-        "stick_left_range_x": 1228.0,
-        "trigger_left_bump": 186.0,
-        "trigger_right_base": 34.0,
-        "trigger_right_bump": 191.0
-      },
       "3C:A9:AB:60:22:B0/P": {
         "stick_left_octagon": [
           [
             1.0,
-            0.013654618473895583
+            0.016224772457459437
           ],
           [
-            0.7566478646253022,
-            0.763855421686747
+            0.7646586345381526,
+            0.7388207360506529
           ],
           [
-            0.088638195004029,
+            0.02248995983935743,
             1.0
           ],
           [
-            -0.7590652699435939,
-            0.727710843373494
+            -0.7485943775100402,
+            0.7095370003957262
           ],
           [
             -1.0,
-            -0.00642570281124498
+            -0.020973486347447567
           ],
           [
-            -0.7687348912167606,
-            -0.7453815261044177
+            -0.7646586345381526,
+            -0.7293233082706767
           ],
           [
-            -0.017727639000805803,
+            -0.01927710843373494,
             -1.0
           ],
           [
-            0.7332796132151491,
-            -0.7751004016064257
+            0.727710843373494,
+            -0.7681044717055797
           ]
         ],
-        "stick_left_range_y": 1245.0,
-        "stick_right_center_y": 2067.0,
-        "stick_right_range_x": 1125.5,
-        "trigger_right_max": 224.0,
-        "trigger_left_max": 225.0,
-        "stick_left_center_x": 2116.0,
+        "stick_left_range_y": 1263.5,
+        "stick_right_center_y": 2068.0,
+        "stick_right_range_x": 1133.5,
+        "trigger_right_max": 225.0,
+        "trigger_left_max": 230.0,
+        "stick_left_center_x": 2112.0,
         "stick_right_octagon": [
           [
             1.0,
-            -0.01588702559576346
+            -0.022887323943661973
           ],
           [
-            0.730786317192359,
-            0.7308031774051191
+            0.7344508160564622,
+            0.7315140845070423
           ],
           [
-            -0.003109729009329187,
+            -0.0013233348037053375,
             1.0
           ],
           [
-            -0.7574411372723234,
-            0.7140335392762577
+            -0.7362152624614028,
+            0.7174295774647887
           ],
           [
             -1.0,
-            0.00264783759929391
+            -0.01232394366197183
           ],
           [
-            -0.7592181252776544,
-            -0.675198587819947
+            -0.7379797088663432,
+            -0.6839788732394366
           ],
           [
-            -0.02265659706796979,
+            -0.0013233348037053375,
             -1.0
           ],
           [
-            0.7592181252776544,
-            -0.7299205648720212
+            0.7591530657256286,
+            -0.7315140845070423
           ]
         ],
-        "stick_right_center_x": 2096.5,
-        "stick_left_center_y": 2070.0,
-        "stick_right_range_y": 1133.0,
-        "trigger_left_base": 33.0,
-        "stick_left_range_x": 1241.0,
-        "trigger_left_bump": 182.0,
-        "trigger_right_base": 29.0,
-        "trigger_right_bump": 180.0
+        "stick_right_center_x": 2085.5,
+        "stick_left_center_y": 2082.5,
+        "stick_right_range_y": 1136.0,
+        "trigger_left_base": 32.0,
+        "stick_left_range_x": 1245.0,
+        "trigger_left_bump": 175.0,
+        "trigger_right_base": 30.0,
+        "trigger_right_bump": 188.0
       }
-    }
-  },
-  "slots": {
-    "0": {
-      "trigger_left_base": 32.0,
-      "trigger_left_bump": 186.0,
-      "trigger_left_max": 228.0,
-      "trigger_right_base": 34.0,
-      "trigger_right_bump": 191.0,
-      "trigger_right_max": 233.0,
-      "stick_left_center_x": 2114.0,
-      "stick_left_range_x": 1228.0,
-      "stick_left_center_y": 2052.0,
-      "stick_left_range_y": 1250.0,
-      "stick_right_center_x": 2140.5,
-      "stick_right_range_x": 1120.5,
-      "stick_right_center_y": 2110.5,
-      "stick_right_range_y": 1113.5,
-      "preferred_device_path": "",
-      "stick_left_octagon": [
-        [
-          1.0,
-          0.008
-        ],
-        [
-          0.7630293159609121,
-          0.7456
-        ],
-        [
-          0.08469055374592833,
-          0.9944
-        ],
-        [
-          -0.752442996742671,
-          0.712
-        ],
-        [
-          -1.0,
-          -0.0184
-        ],
-        [
-          -0.7728013029315961,
-          -0.7176
-        ],
-        [
-          -0.04560260586319218,
-          -1.0
-        ],
-        [
-          0.7312703583061889,
-          -0.7488
-        ]
-      ],
-      "stick_right_octagon": [
-        [
-          1.0,
-          -0.023798832510103278
-        ],
-        [
-          0.7599286033020973,
-          0.7144140098787607
-        ],
-        [
-          0.015618027666220438,
-          1.0
-        ],
-        [
-          -0.7376171352074966,
-          0.7063313875168388
-        ],
-        [
-          -1.0,
-          0.02918724741805119
-        ],
-        [
-          -0.7349397590361446,
-          -0.7063313875168388
-        ],
-        [
-          0.08433734939759036,
-          -0.9982038616973506
-        ],
-        [
-          0.7947344935296743,
-          -0.7431522227211496
-        ]
-      ]
     },
-    "1": {
-      "trigger_left_base": 33.0,
-      "trigger_left_bump": 182.0,
-      "trigger_left_max": 225.0,
-      "trigger_right_base": 29.0,
-      "trigger_right_bump": 180.0,
-      "trigger_right_max": 224.0,
-      "stick_left_center_x": 2116.0,
-      "stick_left_range_x": 1241.0,
-      "stick_left_center_y": 2070.0,
-      "stick_left_range_y": 1245.0,
-      "stick_right_center_x": 2096.5,
-      "stick_right_range_x": 1125.5,
-      "stick_right_center_y": 2067.0,
-      "stick_right_range_y": 1133.0,
-      "preferred_device_path": "",
-      "stick_left_octagon": [
-        [
-          1.0,
-          0.013654618473895583
-        ],
-        [
-          0.7566478646253022,
-          0.763855421686747
-        ],
-        [
-          0.088638195004029,
-          1.0
-        ],
-        [
-          -0.7590652699435939,
-          0.727710843373494
-        ],
-        [
-          -1.0,
-          -0.00642570281124498
-        ],
-        [
-          -0.7687348912167606,
-          -0.7453815261044177
-        ],
-        [
-          -0.017727639000805803,
-          -1.0
-        ],
-        [
-          0.7332796132151491,
-          -0.7751004016064257
-        ]
-      ],
-      "stick_right_octagon": [
-        [
-          1.0,
-          -0.01588702559576346
-        ],
-        [
-          0.730786317192359,
-          0.7308031774051191
-        ],
-        [
-          -0.003109729009329187,
-          1.0
-        ],
-        [
-          -0.7574411372723234,
-          0.7140335392762577
-        ],
-        [
-          -1.0,
-          0.00264783759929391
-        ],
-        [
-          -0.7592181252776544,
-          -0.675198587819947
-        ],
-        [
-          -0.02265659706796979,
-          -1.0
-        ],
-        [
-          0.7592181252776544,
-          -0.7299205648720212
-        ]
-      ]
-    },
-    "2": {
-      "trigger_left_base": 32.0,
-      "trigger_left_bump": 190.0,
-      "trigger_left_max": 230.0,
-      "trigger_right_base": 32.0,
-      "trigger_right_bump": 190.0,
-      "trigger_right_max": 230.0,
-      "stick_left_center_x": 2048,
-      "stick_left_range_x": 2048,
-      "stick_left_center_y": 2048,
-      "stick_left_range_y": 2048,
-      "stick_right_center_x": 2048,
-      "stick_right_range_x": 2048,
-      "stick_right_center_y": 2048,
-      "stick_right_range_y": 2048,
-      "preferred_device_path": "",
-      "stick_left_octagon": null,
-      "stick_right_octagon": null
-    },
-    "3": {
-      "trigger_left_base": 32.0,
-      "trigger_left_bump": 190.0,
-      "trigger_left_max": 230.0,
-      "trigger_right_base": 32.0,
-      "trigger_right_bump": 190.0,
-      "trigger_right_max": 230.0,
-      "stick_left_center_x": 2048,
-      "stick_left_range_x": 2048,
-      "stick_left_center_y": 2048,
-      "stick_left_range_y": 2048,
-      "stick_right_center_x": 2048,
-      "stick_right_range_x": 2048,
-      "stick_right_center_y": 2048,
-      "stick_right_range_y": 2048,
-      "preferred_device_path": "",
-      "stick_left_octagon": null,
-      "stick_right_octagon": null
-    }
+    "trigger_bump_100_percent": false,
+    "minimize_to_tray": true,
+    "auto_connect": false,
+    "emulation_mode": "xbox360"
   }
 }

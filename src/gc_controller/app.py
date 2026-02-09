@@ -141,6 +141,7 @@ class GCControllerEnabler:
         self._auto_scan_pending = False   # True while a scan_connect is in-flight for auto-scan
         self._auto_scan_slot = None       # slot_index used for current auto-scan command
         self._ble_init_in_progress = False
+
         self._ble_init_retry_count = 0
 
         # UI — pass list of cal_mgrs for live octagon drawing
@@ -149,16 +150,16 @@ class GCControllerEnabler:
             slot_calibrations=self.slot_calibrations,
             slot_cal_mgrs=[s.cal_mgr for s in self.slots],
             on_connect=self.connect_controller,
-            on_stick_cal=self.toggle_stick_calibration,
-            on_trigger_cal=self.trigger_cal_step,
+            on_cal_wizard=self.calibration_wizard_step,
             on_save=self.save_settings,
             on_pair=self.pair_controller if self._ble_available else None,
             on_emulate_all=self.toggle_emulation_all,
             on_test_rumble_all=self.test_rumble_all,
             ble_available=self._ble_available,
-            on_forget_ble=(self._clear_known_ble_devices
-                          if self._ble_available and sys.platform != 'linux'
-                          else None),
+            get_known_ble_devices=(self._get_known_ble_devices
+                                  if self._ble_available else None),
+            on_forget_ble_device=(self._forget_ble_device
+                                 if self._ble_available else None),
             on_auto_save=self._auto_save,
         )
 
@@ -239,6 +240,10 @@ class GCControllerEnabler:
             sui.pair_btn.configure(state='disabled')
         self.ui.update_tab_status(slot_index, connected=True, emulating=False)
         self.toggle_emulation(slot_index)
+
+        # Auto-start calibration wizard for uncalibrated controllers
+        if self._needs_calibration(slot_index):
+            self.root.after(500, lambda si=slot_index: self._start_auto_calibration(si))
 
     def _reset_rumble(self, slot_index: int):
         """Send rumble OFF if currently ON and reset rumble state."""
@@ -731,6 +736,10 @@ class GCControllerEnabler:
             self.ui.update_tab_status(slot_index, connected=True, emulating=False)
             self.toggle_emulation(slot_index)
 
+            # Auto-start calibration wizard for uncalibrated controllers
+            if self._needs_calibration(slot_index):
+                self.root.after(500, lambda si=slot_index: self._start_auto_calibration(si))
+
             # Ensure auto-scan is running after successful pair
             if not self._auto_scan_active and self._ble_initialized:
                 self._start_auto_scan()
@@ -782,6 +791,21 @@ class GCControllerEnabler:
         # Redraw octagon and trigger markers with device's calibration
         self.ui.redraw_octagons(slot_index)
         self.ui.draw_trigger_markers(slot_index)
+
+    def _forget_ble_device(self, mac: str):
+        """Remove a single BLE device from the known registry."""
+        devices = self.slot_calibrations[0].get('known_ble_devices', {})
+        addr_upper = mac.upper()
+        if addr_upper in devices:
+            del devices[addr_upper]
+            self._auto_save()
+            # Disconnect if this device is currently connected on any slot
+            for slot in self.slots:
+                if slot.ble_address and slot.ble_address.upper() == addr_upper:
+                    self.root.after(0, lambda s=slot: self.disconnect_controller(s.index))
+            # Stop auto-scan if no known devices remain
+            if not devices:
+                self._stop_auto_scan()
 
     def _clear_known_ble_devices(self):
         """Remove all known BLE devices and stop auto-scan."""
@@ -1516,41 +1540,58 @@ class GCControllerEnabler:
             self._messagebox.showerror("Emulation Error",
                                        f"Failed to start pipe emulation: {error}")
 
-    # ── Stick calibration ────────────────────────────────────────────
+    # ── Calibration wizard ──────────────────────────────────────────
 
-    def toggle_stick_calibration(self, slot_index: int):
-        """Toggle stick calibration on/off for a specific slot."""
+    def _needs_calibration(self, slot_index: int) -> bool:
+        """Check if a slot has default (uncalibrated) stick calibration."""
+        return self.slot_calibrations[slot_index].get('stick_left_octagon') is None
+
+    def _start_auto_calibration(self, slot_index: int):
+        """Start the calibration wizard automatically for a newly connected controller."""
+        if not self.slots[slot_index].is_connected:
+            return
+        self.ui.update_status(slot_index, "New controller — starting calibration...")
+        self.calibration_wizard_step(slot_index)
+
+    def calibration_wizard_step(self, slot_index: int):
+        """Unified calibration wizard: sticks first, then triggers, one button."""
         slot = self.slots[slot_index]
         sui = self.ui.slots[slot_index]
 
         if slot.cal_mgr.stick_calibrating:
+            # Finish stick calibration, chain into trigger calibration
             slot.cal_mgr.finish_stick_calibration()
             self.ui.set_calibration_mode(slot_index, False)
-            sui.stick_cal_btn.configure(text="Calibrate Sticks")
-            sui.stick_cal_status.configure(text="Calibration complete!")
+            self.ui.redraw_octagons(slot_index)
             self._auto_save()
+
+            # Start trigger calibration (step 0 → 1)
+            result = slot.cal_mgr.trigger_cal_next_step()
+            if result:
+                _step, _btn, status_text = result
+                sui.cal_wizard_btn.configure(text="Continue")
+                self.ui.update_status(slot_index, status_text)
+
+        elif slot.cal_mgr.trigger_cal_step > 0:
+            # Advance trigger calibration wizard
+            result = slot.cal_mgr.trigger_cal_next_step()
+            if result:
+                step, _btn, status_text = result
+                self.ui.update_status(slot_index, status_text)
+                if step == 0:
+                    # Wizard complete
+                    sui.cal_wizard_btn.configure(text="Calibration Wizard")
+                    self.ui.draw_trigger_markers(slot_index)
+                    self._auto_save()
+                else:
+                    sui.cal_wizard_btn.configure(text="Continue")
+
         else:
+            # Start stick calibration (phase 1)
             self.ui.set_calibration_mode(slot_index, True)
             slot.cal_mgr.start_stick_calibration()
-            sui.stick_cal_btn.configure(text="Finish Calibration")
-            sui.stick_cal_status.configure(text="Move sticks to all extremes...")
-
-    # ── Trigger calibration ──────────────────────────────────────────
-
-    def trigger_cal_step(self, slot_index: int):
-        """Advance the trigger calibration wizard one step for a specific slot."""
-        slot = self.slots[slot_index]
-        sui = self.ui.slots[slot_index]
-
-        result = slot.cal_mgr.trigger_cal_next_step()
-        if result is not None:
-            step, btn_text, status_text = result
-            sui.trigger_cal_btn.configure(text=btn_text)
-            self.ui.update_status(slot_index, status_text)
-            if step == 0:
-                # Wizard finished — redraw markers
-                self.ui.draw_trigger_markers(slot_index)
-                self._auto_save()
+            sui.cal_wizard_btn.configure(text="Continue")
+            self.ui.update_status(slot_index, "Move sticks to all extremes, then click Continue")
 
     # ── Settings ─────────────────────────────────────────────────────
 
