@@ -400,7 +400,7 @@ class GCControllerVisual:
             player_num: 0 = all off, 1–4 = that LED lit.
         """
         for i in range(self.LED_COUNT):
-            color = self.LED_COLOR_ON if (i + 1) == player_num else self.LED_COLOR_OFF
+            color = self.LED_COLOR_ON if (i + 1) <= player_num else self.LED_COLOR_OFF
             self.canvas.itemconfigure(self._led_items[i], fill=color)
 
     def update_trigger_fill(self, side: str, value_0_255: int):
