@@ -346,6 +346,10 @@ class ControllerUI:
         self._slot_emulating[slot_index] = emulating
         self._refresh_tab_title(slot_index)
 
+        # Update player LED indicators
+        s = self.slots[slot_index]
+        s.controller_visual.update_player_leds(slot_index + 1 if connected else 0)
+
     def _refresh_tab_title(self, slot_index: int):
         """Rebuild tab title from connection, emulation, and dirty state."""
         prefix = "\u2713 " if self._slot_connected[slot_index] else ""

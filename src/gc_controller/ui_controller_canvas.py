@@ -49,6 +49,16 @@ class GCControllerVisual:
     TRIGGER_W = 130
     TRIGGER_H = 20
 
+    # ── Player LED geometry (between L/R trigger bars) ────────────────
+    LED_SIZE = 6
+    LED_GAP = 4
+    LED_COUNT = 4
+    _LED_TOTAL_W = LED_COUNT * LED_SIZE + (LED_COUNT - 1) * LED_GAP  # 36
+    LED_START_X = (CANVAS_W - _LED_TOTAL_W) // 2   # centered
+    LED_Y = TRIGGER_L_Y + (TRIGGER_H - LED_SIZE) // 2  # vertically centered with triggers
+    LED_COLOR_OFF = '#1a1a1a'
+    LED_COLOR_ON = '#00e050'
+
     # ── Button name → SVG layer ID for pressed overlays ───────────────
     # Layers rendered BELOW the body in the SVG (body occludes parts of them).
     _UNDER_BODY_MAP = {
@@ -197,7 +207,10 @@ class GCControllerVisual:
         # 2. Trigger fill bars (lightweight canvas rectangles)
         self._draw_triggers()
 
-        # 3. Calibration octagons and dots (hidden in normal mode)
+        # 3. Player LED indicators (between trigger bars)
+        self._draw_leds()
+
+        # 4. Calibration octagons and dots (hidden in normal mode)
         self._draw_sticks()
 
     def _draw_triggers(self):
@@ -223,6 +236,19 @@ class GCControllerVisual:
                 font=("", 12, "bold"),
                 tags=f'trigger_{side}_text',
             )
+
+    def _draw_leds(self):
+        """Draw 4 player LED indicator squares between the trigger bars."""
+        self._led_items = []
+        for i in range(self.LED_COUNT):
+            x = self.LED_START_X + i * (self.LED_SIZE + self.LED_GAP)
+            y = self.LED_Y
+            item = self.canvas.create_rectangle(
+                x, y, x + self.LED_SIZE, y + self.LED_SIZE,
+                fill=self.LED_COLOR_OFF, outline='#333', width=1,
+                tags=f'led_{i}',
+            )
+            self._led_items.append(item)
 
     def _draw_sticks(self):
         """Draw stick octagon outlines and movable position dots."""
@@ -366,6 +392,16 @@ class GCControllerVisual:
         self.canvas.coords(dot_tag,
                            x_pos - dr, y_pos - dr,
                            x_pos + dr, y_pos + dr)
+
+    def update_player_leds(self, player_num: int):
+        """Update player LED indicators.
+
+        Args:
+            player_num: 0 = all off, 1–4 = that LED lit.
+        """
+        for i in range(self.LED_COUNT):
+            color = self.LED_COLOR_ON if (i + 1) <= player_num else self.LED_COLOR_OFF
+            self.canvas.itemconfigure(self._led_items[i], fill=color)
 
     def update_trigger_fill(self, side: str, value_0_255: int):
         """Fill trigger bar proportionally.
@@ -511,6 +547,9 @@ class GCControllerVisual:
         # Empty triggers
         self.update_trigger_fill('left', 0)
         self.update_trigger_fill('right', 0)
+
+        # Turn off all player LEDs
+        self.update_player_leds(0)
 
     def grid(self, **kwargs):
         """Proxy grid() to the underlying canvas."""
