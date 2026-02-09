@@ -229,7 +229,7 @@ class ControllerUI:
 
         if self._ble_available and on_pair:
             slot_ui.pair_btn = customtkinter.CTkButton(
-                btn_frame, text="Connect Wireless",
+                btn_frame, text="Pair New Controller",
                 command=lambda i=index: on_pair(i),
                 **btn_kwargs,
             )

@@ -69,7 +69,7 @@ BUTTONS = [
     ButtonInfo(5, 0x10, "Chat"),
 ]
 
-# Default calibration values
+# Default calibration values (per-slot, runtime only)
 DEFAULT_CALIBRATION = {
     'trigger_left_base': 32.0,
     'trigger_left_bump': 190.0,
@@ -86,10 +86,20 @@ DEFAULT_CALIBRATION = {
     'auto_connect': False,
     'minimize_to_tray': True,
     'preferred_device_path': '',
-    'connection_mode': 'usb',
-    'preferred_ble_address': '',
     'stick_left_octagon': None,
     'stick_right_octagon': None,
+}
+
+# Calibration keys that are per-device (follow the physical controller, not the slot).
+# These are stored in known_ble_devices[mac] and loaded into a slot at connect time.
+BLE_DEVICE_CAL_KEYS = {
+    'stick_left_octagon', 'stick_right_octagon',
+    'stick_left_center_x', 'stick_left_range_x',
+    'stick_left_center_y', 'stick_left_range_y',
+    'stick_right_center_x', 'stick_right_range_x',
+    'stick_right_center_y', 'stick_right_range_y',
+    'trigger_left_base', 'trigger_left_bump', 'trigger_left_max',
+    'trigger_right_base', 'trigger_right_bump', 'trigger_right_max',
 }
 
 
