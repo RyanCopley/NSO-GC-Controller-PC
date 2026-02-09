@@ -57,7 +57,8 @@ class ControllerUI:
                  on_pair: Optional[Callable[[int], None]] = None,
                  on_emulate_all: Optional[Callable] = None,
                  on_test_rumble_all: Optional[Callable] = None,
-                 ble_available: bool = False):
+                 ble_available: bool = False,
+                 on_forget_ble: Optional[Callable] = None):
         self._root = root
         self._slot_calibrations = slot_calibrations
         self._slot_cal_mgrs = slot_cal_mgrs
@@ -80,6 +81,7 @@ class ControllerUI:
         self._on_emulate_all = on_emulate_all
         self._on_test_rumble_all = on_test_rumble_all
         self._on_save = on_save
+        self._on_forget_ble = on_forget_ble
 
         # Dirty (unsaved changes) tracking per slot
         self._slot_dirty: List[bool] = [False] * MAX_SLOTS
@@ -274,6 +276,7 @@ class ControllerUI:
             is_any_emulating=lambda: any(self._slot_emulating),
             is_any_connected=lambda: any(self._slot_connected),
             on_save=self._on_save,
+            on_forget_ble=self._on_forget_ble,
         )
 
     # ── UI update methods ────────────────────────────────────────────

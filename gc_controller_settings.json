@@ -2,9 +2,12 @@
   "version": 2,
   "global": {
     "trigger_bump_100_percent": false,
-    "emulation_mode": "dsu",
+    "emulation_mode": "xbox360",
     "auto_connect": false,
-    "minimize_to_tray": true
+    "minimize_to_tray": true,
+    "known_ble_addresses": [
+      "3C:A9:AB:60:22:B0/P"
+    ]
   },
   "slots": {
     "0": {
@@ -14,19 +17,85 @@
       "trigger_right_base": 32.0,
       "trigger_right_bump": 190.0,
       "trigger_right_max": 230.0,
-      "stick_left_center_x": 2048,
-      "stick_left_range_x": 2048,
-      "stick_left_center_y": 2048,
-      "stick_left_range_y": 2048,
-      "stick_right_center_x": 2048,
-      "stick_right_range_x": 2048,
-      "stick_right_center_y": 2048,
-      "stick_right_range_y": 2048,
+      "stick_left_center_x": 2117.5,
+      "stick_left_range_x": 1240.5,
+      "stick_left_center_y": 2080.5,
+      "stick_left_range_y": 1250.5,
+      "stick_right_center_x": 2086.0,
+      "stick_right_range_x": 1133.0,
+      "stick_right_center_y": 2062.5,
+      "stick_right_range_y": 1131.5,
       "preferred_device_path": "",
-      "connection_mode": "usb",
-      "preferred_ble_address": "",
-      "stick_left_octagon": null,
-      "stick_right_octagon": null
+      "connection_mode": "ble",
+      "preferred_ble_address": "3C:A9:AB:60:22:B0/P",
+      "stick_left_octagon": [
+        [
+          1.0,
+          -0.01799280287884846
+        ],
+        [
+          0.7549375251914551,
+          0.7377049180327869
+        ],
+        [
+          0.031035872632003223,
+          1.0
+        ],
+        [
+          -0.7484885126964933,
+          0.7121151539384246
+        ],
+        [
+          -1.0,
+          -0.010795681727309077
+        ],
+        [
+          -0.7863764611043934,
+          -0.7201119552179128
+        ],
+        [
+          -0.04232164449818621,
+          -1.0
+        ],
+        [
+          0.7347843611446997,
+          -0.7712914834066373
+        ]
+      ],
+      "stick_right_octagon": [
+        [
+          1.0,
+          -0.008395934600088379
+        ],
+        [
+          0.736098852603707,
+          0.7313300927971719
+        ],
+        [
+          0.00529567519858782,
+          1.0
+        ],
+        [
+          -0.7458075904677847,
+          0.7092355280600973
+        ],
+        [
+          -1.0,
+          -0.003977021652673442
+        ],
+        [
+          -0.7484554280670785,
+          -0.6756517896597437
+        ],
+        [
+          -0.00529567519858782,
+          -1.0
+        ],
+        [
+          0.7572815533980582,
+          -0.7322138753866548
+        ]
+      ]
     },
     "1": {
       "trigger_left_base": 32.0,

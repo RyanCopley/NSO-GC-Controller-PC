@@ -37,7 +37,8 @@ class SettingsDialog:
                  on_test_rumble_all: Callable,
                  is_any_emulating: Callable[[], bool],
                  is_any_connected: Callable[[], bool] = lambda: False,
-                 on_save: Optional[Callable] = None):
+                 on_save: Optional[Callable] = None,
+                 on_forget_ble: Optional[Callable] = None):
         self._parent = parent
         self._emu_mode_var = emu_mode_var
         self._trigger_mode_var = trigger_mode_var
@@ -48,6 +49,7 @@ class SettingsDialog:
         self._is_any_emulating = is_any_emulating
         self._is_any_connected = is_any_connected
         self._on_save = on_save
+        self._on_forget_ble = on_forget_ble
 
         self._dlg = customtkinter.CTkToplevel(parent)
         self._dlg.title("Settings")
@@ -198,6 +200,18 @@ class SettingsDialog:
         )
         self._rumble_btn.pack(anchor=tk.W, pady=4)
 
+        # ── Forget Wireless Devices ──
+        if self._on_forget_ble:
+            customtkinter.CTkButton(
+                right, text="Forget Wireless Devices",
+                command=self._on_forget_ble_click,
+                fg_color="#463F6F",
+                hover_color="#5A5190",
+                text_color=T.TEXT_PRIMARY,
+                corner_radius=12, height=36, width=220,
+                font=(T.FONT_FAMILY, 14),
+            ).pack(anchor=tk.W, pady=4)
+
         # ── About / Credits ──
         sep2 = customtkinter.CTkFrame(right, fg_color="#463F6F", height=2)
         sep2.pack(fill=tk.X, pady=(12, 8))
@@ -252,6 +266,10 @@ class SettingsDialog:
 
         # grab_set after window is visible to avoid TclError
         self._dlg.after(10, self._dlg.grab_set)
+
+    def _on_forget_ble_click(self):
+        if self._on_forget_ble:
+            self._on_forget_ble()
 
     def _on_save_click(self):
         if self._on_save:

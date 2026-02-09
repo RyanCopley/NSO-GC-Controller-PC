@@ -99,6 +99,10 @@ class GCControllerEnabler:
         self.settings_mgr = SettingsManager(self.slot_calibrations, os.getcwd())
         self.settings_mgr.load()
 
+        # Ensure known_ble_addresses exists in global config (slot 0)
+        if 'known_ble_addresses' not in self.slot_calibrations[0]:
+            self.slot_calibrations[0]['known_ble_addresses'] = []
+
         # Create slots (each with own managers)
         self.slots: list[ControllerSlot] = []
         for i in range(MAX_SLOTS):
@@ -128,6 +132,8 @@ class GCControllerEnabler:
         self._ble_init_event = threading.Event()
         self._ble_init_result = None
         self._ble_pair_mode = {}  # slot_index -> 'pair' | 'reconnect'
+        self._diff_scan_callback = {}  # slot_index -> completion callback
+        self._ble_known_scan_slot = None  # slot being scanned for known-addr matching
 
         # UI — pass list of cal_mgrs for live octagon drawing
         self.ui = ControllerUI(
@@ -142,6 +148,9 @@ class GCControllerEnabler:
             on_emulate_all=self.toggle_emulation_all,
             on_test_rumble_all=self.test_rumble_all,
             ble_available=self._ble_available,
+            on_forget_ble=(self._clear_known_ble_addresses
+                          if self._ble_available and sys.platform != 'linux'
+                          else None),
         )
 
         # Now that UI is built, draw initial trigger markers for all slots
@@ -479,9 +488,10 @@ class GCControllerEnabler:
     def pair_controller(self, slot_index: int):
         """Start BLE pairing for a controller slot.
 
-        Two flows:
-        - Saved address exists: send scan_connect (scan-first with early stop)
-        - No saved address: send scan_devices, show picker, then connect_device
+        Three flows (in priority order):
+        1. Per-slot preferred_ble_address exists: direct scan_connect (fast reconnect)
+        2. Global known_ble_addresses exist: single scan to check for matches
+        3. No known addresses: launch differential scan wizard
         """
         slot = self.slots[slot_index]
         sui = self.ui.slots[slot_index]
@@ -522,18 +532,58 @@ class GCControllerEnabler:
                 and _mac_re.match(target_addr)):
             target_addr = None
 
-        # Always use scan_connect: with a target address it stops as soon
-        # as the device is found; without one it scans briefly then tries
-        # each Nintendo-like device via handshake (auto-identify).
+        # Flow 1: Per-slot saved address — direct fast reconnect
+        if target_addr:
+            self._ble_pair_mode[slot_index] = 'pair'
+            self._send_ble_cmd({
+                "cmd": "scan_connect",
+                "slot_index": slot_index,
+                "target_address": target_addr,
+            })
+            return
+
+        # Flows 2 & 3 use scan_devices / wizard — only on macOS/Windows (Bleak).
+        # Linux (Bumble) uses scan_connect which tries each Nintendo-OUI device.
+        if sys.platform != 'linux':
+            # Flow 2: Global known addresses — scan once, check for matches
+            known = self._get_known_ble_addresses()
+            if known:
+                self._try_known_addresses_scan(slot_index)
+                return
+
+            # Flow 3: No known addresses — launch wizard
+            self._show_diff_scan_wizard(slot_index)
+            return
+
+        # Linux fallback: scan_connect without target (auto-identify via handshake)
         self._ble_pair_mode[slot_index] = 'pair'
         self._send_ble_cmd({
             "cmd": "scan_connect",
             "slot_index": slot_index,
-            "target_address": target_addr,
+            "target_address": None,
         })
 
     def _on_devices_found(self, slot_index: int, devices: list[dict]):
-        """Handle devices_found event: show picker dialog, then connect."""
+        """Handle devices_found event.
+
+        Routes to:
+        - Diff scan wizard completion callback (if active)
+        - Known-address matching logic (if scanning for known addresses)
+        - Original picker dialog (fallback)
+        """
+        # Route to wizard completion callback if one is active
+        cb = self._diff_scan_callback.pop(slot_index, None)
+        if cb is not None:
+            cb(devices)
+            return
+
+        # Route to known-address matching logic
+        if self._ble_known_scan_slot == slot_index:
+            self._ble_known_scan_slot = None
+            self._on_known_scan_result(slot_index, devices)
+            return
+
+        # Original picker fallback
         from .ui_ble_dialog import BLEDevicePickerDialog
 
         sui = self.ui.slots[slot_index]
@@ -581,6 +631,9 @@ class GCControllerEnabler:
             if mac != old_addr:
                 self.ui.mark_slot_dirty(slot_index)
 
+            # Add to global known addresses for future fast-path
+            self._add_known_ble_address(mac)
+
             # Start input processor in BLE mode
             slot.input_proc.start(mode='ble')
 
@@ -597,6 +650,88 @@ class GCControllerEnabler:
             if error:
                 self.ui.update_ble_status(slot_index, f"Error: {error}")
             # Status was already set by on_status callback
+
+    def _get_known_ble_addresses(self) -> list[str]:
+        """Return the global list of known BLE addresses."""
+        return self.slot_calibrations[0].get('known_ble_addresses', [])
+
+    def _add_known_ble_address(self, address: str):
+        """Add a BLE address to the global known list (deduplicated)."""
+        known = self.slot_calibrations[0].setdefault('known_ble_addresses', [])
+        addr_upper = address.upper()
+        if addr_upper not in [a.upper() for a in known]:
+            known.append(addr_upper)
+            self.ui.mark_slot_dirty(0)
+
+    def _clear_known_ble_addresses(self):
+        """Remove all known BLE addresses."""
+        self.slot_calibrations[0]['known_ble_addresses'] = []
+        self.ui.mark_slot_dirty(0)
+
+    def _try_known_addresses_scan(self, slot_index: int):
+        """Scan once and check if any known address is advertising."""
+        self._ble_known_scan_slot = slot_index
+        self.ui.update_ble_status(slot_index, "Scanning for known controllers...")
+        self._send_ble_cmd({
+            "cmd": "scan_devices",
+            "slot_index": slot_index,
+        })
+
+    def _on_known_scan_result(self, slot_index: int, devices: list[dict]):
+        """Handle scan results when checking for known addresses."""
+        known = set(a.upper() for a in self._get_known_ble_addresses())
+        found_addresses = {d['address'].upper() for d in devices}
+
+        match = known & found_addresses
+        if match:
+            # Connect to the first matching known address
+            addr = next(iter(match))
+            self.ui.update_ble_status(slot_index, f"Found known controller: {addr}")
+            self._ble_pair_mode[slot_index] = 'pair'
+            self._send_ble_cmd({
+                "cmd": "connect_device",
+                "slot_index": slot_index,
+                "address": addr,
+            })
+        else:
+            # No known address found — fall through to wizard
+            self._show_diff_scan_wizard(slot_index)
+
+    def _show_diff_scan_wizard(self, slot_index: int):
+        """Launch the differential scan wizard."""
+        from .ui_ble_scan_wizard import BLEScanWizard
+
+        def on_scan(completion_cb):
+            """Wire the wizard's scan request to the BLE subprocess."""
+            self._diff_scan_callback[slot_index] = completion_cb
+            self._send_ble_cmd({
+                "cmd": "scan_devices",
+                "slot_index": slot_index,
+            })
+
+        wizard = BLEScanWizard(self.root, on_scan=on_scan)
+        chosen_address = wizard.show()
+
+        # Clean up any leftover callback
+        self._diff_scan_callback.pop(slot_index, None)
+
+        sui = self.ui.slots[slot_index]
+
+        if not chosen_address:
+            # Wizard cancelled
+            self.ui.update_ble_status(slot_index, "Pairing cancelled")
+            if sui.pair_btn:
+                sui.pair_btn.configure(state='normal')
+            return
+
+        # Connect to the chosen device
+        self.ui.update_ble_status(slot_index, "Connecting...")
+        self._ble_pair_mode[slot_index] = 'pair'
+        self._send_ble_cmd({
+            "cmd": "connect_device",
+            "slot_index": slot_index,
+            "address": chosen_address,
+        })
 
     def _disconnect_ble(self, slot_index: int):
         """Disconnect BLE on a specific slot."""

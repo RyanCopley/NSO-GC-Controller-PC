@@ -9,6 +9,8 @@ Protocol (JSON lines):
     {"cmd": "stop_bluez"}
     {"cmd": "open", "hci_index": 0}
     {"cmd": "scan_connect", "slot_index": 0, "target_address": "XX:XX:XX:XX:XX:XX"}
+    {"cmd": "scan_devices", "slot_index": 0}
+    {"cmd": "connect_device", "slot_index": 0, "address": "XX:XX:XX:XX:XX:XX"}
     {"cmd": "disconnect", "slot_index": 0, "address": "XX:XX:XX:XX:XX:XX"}
     {"cmd": "shutdown"}
 
@@ -20,6 +22,7 @@ Protocol (JSON lines):
     {"e": "status", "s": <slot>, "msg": "..."}
     {"e": "connected", "s": <slot>, "mac": "..."}
     {"e": "connect_error", "s": <slot>, "msg": "..."}
+    {"e": "devices_found", "s": <slot>, "devices": [...]}
     {"e": "data", "s": <slot>, "d": "<base64>"}
     {"e": "disconnected", "s": <slot>}
 """
@@ -63,6 +66,18 @@ class PipeQueue:
 
     def get_nowait(self):
         raise queue.Empty()
+
+
+async def do_scan_devices(backend, slot_index):
+    """Run scan_only and send back the list of discovered devices."""
+    try:
+        send({"e": "status", "s": slot_index, "msg": "Scanning for devices..."})
+        devices = await backend.scan_only()
+        send({"e": "devices_found", "s": slot_index, "devices": devices})
+    except asyncio.CancelledError:
+        pass
+    except Exception as ex:
+        send({"e": "connect_error", "s": slot_index, "msg": str(ex)})
 
 
 async def do_scan_connect(backend, slot_index, target_address,
@@ -171,6 +186,23 @@ def main():
                 connect_tasks[si] = asyncio.create_task(
                     do_scan_connect(backend, si, cmd.get("target_address"),
                                     cmd.get("exclude_addresses"),
+                                    slot_macs=slot_macs))
+
+            elif action == "scan_devices":
+                si = cmd["slot_index"]
+                if si in connect_tasks and not connect_tasks[si].done():
+                    connect_tasks[si].cancel()
+                connect_tasks[si] = asyncio.create_task(
+                    do_scan_devices(backend, si))
+
+            elif action == "connect_device":
+                si = cmd["slot_index"]
+                addr = cmd.get("address", "")
+                if si in connect_tasks and not connect_tasks[si].done():
+                    connect_tasks[si].cancel()
+                # Reuse scan_and_connect with target_address (skips scanning)
+                connect_tasks[si] = asyncio.create_task(
+                    do_scan_connect(backend, si, addr,
                                     slot_macs=slot_macs))
 
             elif action == "rumble":

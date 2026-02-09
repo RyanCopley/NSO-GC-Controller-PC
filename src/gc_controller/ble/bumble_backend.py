@@ -276,6 +276,47 @@ class BumbleBackend:
 
         return found_mac[0]
 
+    async def scan_only(self, scan_timeout: float = 4.0) -> list[dict]:
+        """Run a full BLE scan and return all discovered devices.
+
+        Returns a list of dicts with keys: address, name, rssi.
+        Unlike _scan(), this captures ALL advertising devices, not just
+        Nintendo OUI matches.
+        """
+        if not self._device:
+            return []
+
+        found: dict[str, dict] = {}
+
+        def on_advertisement(advertisement):
+            try:
+                addr_str = str(advertisement.address).upper()
+                # Skip devices already connected
+                if addr_str in self._connections:
+                    return
+                rssi = getattr(advertisement, 'rssi', -999) or -999
+                name = advertisement.data.get(0x09, b'').decode('utf-8', errors='replace') if hasattr(advertisement, 'data') else ''
+                if not name:
+                    name = getattr(advertisement, 'name', '') or ''
+                # Keep the strongest signal if seen multiple times
+                if addr_str not in found or rssi > found[addr_str].get('rssi', -999):
+                    found[addr_str] = {
+                        'address': addr_str,
+                        'name': name,
+                        'rssi': rssi,
+                    }
+            except Exception:
+                pass
+
+        self._device.on("advertisement", on_advertisement)
+        await self._device.start_scanning(filter_duplicates=False)
+
+        await asyncio.sleep(scan_timeout)
+
+        await self._device.stop_scanning()
+
+        return list(found.values())
+
     async def send_rumble(self, mac: str, packet: bytes) -> bool:
         """Send rumble packet to controller via ATT write (no response)."""
         peer = self._peers.get(mac)
