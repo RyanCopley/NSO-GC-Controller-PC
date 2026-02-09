@@ -925,6 +925,8 @@ class GCControllerEnabler:
 
             if mode == 'dolphin_pipe':
                 self._start_dolphin_pipe_emulation(slot_index)
+            elif mode == 'dsu':
+                self._start_dsu_emulation(slot_index)
             else:
                 self._start_xbox360_emulation(slot_index)
 
@@ -1000,6 +1002,19 @@ class GCControllerEnabler:
         except Exception as e:
             self._messagebox.showerror("Emulation Error",
                                        f"Failed to start emulation: {e}")
+
+    def _start_dsu_emulation(self, slot_index: int):
+        """Start DSU server emulation synchronously."""
+        slot = self.slots[slot_index]
+        try:
+            slot.emu_mgr.start('dsu', slot_index=slot_index,
+                               rumble_callback=self._make_rumble_callback(slot_index))
+            port = getattr(slot.emu_mgr.gamepad, 'port', 26760)
+            self.ui.update_emu_status(slot_index, f"DSU :{port} — Ready")
+            self.ui.update_tab_status(slot_index, connected=True, emulating=True)
+        except Exception as e:
+            self._messagebox.showerror("Emulation Error",
+                                       f"Failed to start DSU emulation: {e}")
 
     def _start_dolphin_pipe_emulation(self, slot_index: int):
         """Start Dolphin pipe emulation on a background thread.
@@ -1632,11 +1647,14 @@ def run_headless(mode_override: str = None):
         emu_mgr = EmulationManager(cal_mgr)
         slot_mode = mode_override if mode_override else cal.get('emulation_mode', mode)
 
-        mode_label = "Dolphin pipe" if slot_mode == 'dolphin_pipe' else "Xbox 360"
+        mode_label = {"dolphin_pipe": "Dolphin pipe", "dsu": "DSU server"}.get(slot_mode, "Xbox 360")
         print(f"[slot {i + 1}] Starting {mode_label} emulation...")
         try:
             rumble_cb = _make_headless_rumble_cb(i, conn_mgr_ref=conn_mgr)
             emu_mgr.start(slot_mode, slot_index=i, rumble_callback=rumble_cb)
+            if slot_mode == 'dsu':
+                port = getattr(emu_mgr.gamepad, 'port', 26760)
+                print(f"[slot {i + 1}] DSU server on port {port}")
         except Exception as e:
             print(f"[slot {i + 1}] Failed to start emulation: {e}")
             conn_mgr.disconnect()
@@ -1777,12 +1795,15 @@ def run_headless(mode_override: str = None):
 
             emu_mgr = EmulationManager(cal_mgr)
             slot_mode = mode_override if mode_override else cal.get('emulation_mode', mode)
-            mode_label = "Dolphin pipe" if slot_mode == 'dolphin_pipe' else "Xbox 360"
+            mode_label = {"dolphin_pipe": "Dolphin pipe", "dsu": "DSU server"}.get(slot_mode, "Xbox 360")
             print(f"[slot {si + 1}] Starting {mode_label} emulation...")
 
             try:
                 rumble_cb = _make_headless_rumble_cb(si)
                 emu_mgr.start(slot_mode, slot_index=si, rumble_callback=rumble_cb)
+                if slot_mode == 'dsu':
+                    port = getattr(emu_mgr.gamepad, 'port', 26760)
+                    print(f"[slot {si + 1}] DSU server on port {port}")
             except Exception as e:
                 print(f"[slot {si + 1}] Failed to start emulation: {e}")
                 ble_data_queues.pop(si, None)
@@ -2014,9 +2035,11 @@ def run_headless(mode_override: str = None):
                                     idx, conn_mgr_ref=conn_mgr)
                                 emu_mgr.start(slot_mode, slot_index=idx,
                                               rumble_callback=rumble_cb)
-                                mode_label = "Dolphin pipe" if slot_mode == 'dolphin_pipe' \
-                                    else "Xbox 360"
+                                mode_label = {"dolphin_pipe": "Dolphin pipe", "dsu": "DSU server"}.get(slot_mode, "Xbox 360")
                                 print(f"[slot {idx + 1}] {mode_label} emulation resumed.")
+                                if slot_mode == 'dsu':
+                                    port = getattr(emu_mgr.gamepad, 'port', 26760)
+                                    print(f"[slot {idx + 1}] DSU server on port {port}")
                             except Exception as e:
                                 print(f"[slot {idx + 1}] Failed to resume emulation: {e}")
                         break
@@ -2069,7 +2092,7 @@ def main():
     )
     parser.add_argument(
         "--mode",
-        choices=["xbox360", "dolphin_pipe"],
+        choices=["xbox360", "dolphin_pipe", "dsu"],
         default=None,
         help="emulation mode for headless operation (default: use saved setting)",
     )

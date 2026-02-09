@@ -106,6 +106,12 @@ class SettingsDialog:
             **radio_kwargs,
         ).pack(anchor=tk.W, padx=16, pady=1)
 
+        customtkinter.CTkRadioButton(
+            left, text="DSU Server",
+            variable=self._emu_mode_var, value='dsu',
+            **radio_kwargs,
+        ).pack(anchor=tk.W, padx=16, pady=1)
+
         # ── Trigger Mode ──
         customtkinter.CTkLabel(
             left, text="Trigger Mode",
