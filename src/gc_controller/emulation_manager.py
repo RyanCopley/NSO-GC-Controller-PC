@@ -32,7 +32,7 @@ class EmulationManager:
         self.mode = mode
         self.gamepad = create_gamepad(mode, slot_index=slot_index,
                                      cancel_event=cancel_event)
-        if rumble_callback and mode == 'xbox360':
+        if rumble_callback and mode in ('xbox360', 'dsu'):
             self.gamepad.set_rumble_callback(rumble_callback)
         self.is_emulating = True
 

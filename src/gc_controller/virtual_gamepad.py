@@ -589,6 +589,9 @@ class DolphinPipeGamepad(VirtualGamepad):
 
 def is_emulation_available(mode: str = 'xbox360') -> bool:
     """Check whether virtual gamepad emulation is available on this platform."""
+    if mode == 'dsu':
+        return True  # DSU only needs UDP sockets, available everywhere
+
     if mode == 'dolphin_pipe':
         return sys.platform in ('darwin', 'linux')
 
@@ -612,6 +615,9 @@ def is_emulation_available(mode: str = 'xbox360') -> bool:
 
 def get_emulation_unavailable_reason(mode: str = 'xbox360') -> str:
     """Return a human-readable explanation of why emulation is unavailable."""
+    if mode == 'dsu':
+        return "DSU server mode should always be available."
+
     if mode == 'dolphin_pipe':
         return "Dolphin pipe emulation is only supported on macOS and Linux."
 
@@ -668,6 +674,10 @@ def get_emulation_unavailable_reason(mode: str = 'xbox360') -> str:
 def create_gamepad(mode: str = 'xbox360', slot_index: int = 0,
                    cancel_event: threading.Event | None = None) -> VirtualGamepad:
     """Factory: create the appropriate VirtualGamepad for the current platform/mode."""
+    if mode == 'dsu':
+        from .dsu_server import DSUGamepad
+        return DSUGamepad(slot_index=slot_index)
+
     if mode == 'dolphin_pipe':
         pipe_name = f'gc_controller_{slot_index + 1}'
         return DolphinPipeGamepad(pipe_name=pipe_name, cancel_event=cancel_event)
