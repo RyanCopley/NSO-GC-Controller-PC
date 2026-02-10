@@ -153,6 +153,23 @@ class BleakBackend:
         finally:
             await scanner.stop()
 
+        # On Windows, bonded devices may not appear in scan results (WinRT
+        # caches them separately).  If we have a target address that wasn't
+        # found in the scan, try connecting directly by address — BleakClient
+        # can connect to bonded devices without a prior scan result.
+        target_in_scan = target_address and any(
+            a.upper() == target_address.upper() for a in found_devices)
+
+        if target_address and not target_in_scan:
+            _log(f"Target {target_address} not in scan results, "
+                 f"trying direct connect (bonded device?)")
+            on_status(f"Connecting to {target_address}...")
+            result = await self._connect_and_init(
+                target_address, None, slot_index, data_queue,
+                on_status, on_disconnect, connect_timeout)
+            if result:
+                return result
+
         if not found_devices:
             on_status("No devices found")
             return None
@@ -258,14 +275,17 @@ class BleakBackend:
         """
         address = _normalize_address(address) or address
         ble_device = self._last_scan.get(address)
-        if not ble_device:
-            _log(f"connect_device: {address} not in scan cache")
-            on_status(f"Device {address} not found in scan results")
-            return None
 
-        name = ble_device.name or "(no name)"
-        _log(f"connect_device: connecting to {name} ({address})...")
-        on_status(f"Connecting to {name}...")
+        if not ble_device:
+            # On Windows, bonded devices may not appear in scan results.
+            # Try connecting directly by address — BleakClient handles this.
+            _log(f"connect_device: {address} not in scan cache, "
+                 f"trying direct connect")
+            on_status(f"Connecting to {address}...")
+        else:
+            name = ble_device.name or "(no name)"
+            _log(f"connect_device: connecting to {name} ({address})...")
+            on_status(f"Connecting to {name}...")
 
         return await self._connect_and_init(
             address, ble_device, slot_index, data_queue,
