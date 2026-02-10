@@ -140,6 +140,7 @@ class GCControllerEnabler:
         self._auto_scan_timer_id = None
         self._auto_scan_pending = False   # True while a scan_connect is in-flight for auto-scan
         self._auto_scan_slot = None       # slot_index used for current auto-scan command
+        self._auto_scan_addr_index = 0   # round-robin index for known address targeting
         self._ble_init_in_progress = False
 
         self._ble_init_retry_count = 0
@@ -972,15 +973,22 @@ class GCControllerEnabler:
             except Exception:
                 break
 
-        # Scan for ANY Nintendo controller (no target), excluding
-        # addresses already connected so we don't rediscover them.
+        # Target a specific known address (round-robin).  On Windows,
+        # bonded devices are invisible to BLE scans — by specifying a
+        # target the Bleak backend will attempt a direct connection when
+        # the target is not found in scan results.  On Linux (Bumble) a
+        # target address skips scanning and connects directly, which is
+        # also faster.
+        target = unconnected[self._auto_scan_addr_index % len(unconnected)]
+        self._auto_scan_addr_index += 1
+
         self._auto_scan_pending = True
         self._auto_scan_slot = slot_idx
         self._ble_pair_mode[slot_idx] = 'autoscan'
         self._send_ble_cmd({
             "cmd": "scan_connect",
             "slot_index": slot_idx,
-            "target_address": None,
+            "target_address": target,
             "exclude_addresses": list(connected_addrs),
         })
 
