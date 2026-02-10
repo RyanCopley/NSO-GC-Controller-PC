@@ -916,9 +916,10 @@ class GCControllerEnabler:
     def _auto_scan_tick(self):
         """Periodic callback: scan for any known BLE controller.
 
-        Sends scan_connect WITHOUT a target address so the backend discovers
-        whichever Nintendo controller is available. On success, we check if
-        the connected MAC is in the known list.
+        On Windows/Linux, targets a specific known address (round-robin) so
+        the Bleak backend can direct-connect to bonded devices invisible to
+        scans.  On macOS, uses a blind scan (no target) since CoreBluetooth
+        peripheral cache is unreliable — handshake identification works better.
         """
         self._auto_scan_timer_id = None
 
@@ -973,14 +974,18 @@ class GCControllerEnabler:
             except Exception:
                 break
 
-        # Target a specific known address (round-robin).  On Windows,
-        # bonded devices are invisible to BLE scans — by specifying a
-        # target the Bleak backend will attempt a direct connection when
-        # the target is not found in scan results.  On Linux (Bumble) a
-        # target address skips scanning and connects directly, which is
-        # also faster.
-        target = unconnected[self._auto_scan_addr_index % len(unconnected)]
-        self._auto_scan_addr_index += 1
+        # On Windows, bonded devices are invisible to BLE scans — target
+        # a specific known address so the Bleak backend will attempt a
+        # direct connection when the target is not found in scan results.
+        # On macOS, CoreBluetooth's peripheral cache is unreliable, so a
+        # blind scan (no target) with handshake identification works better.
+        # On Linux (Bumble), a target address skips scanning and connects
+        # directly, which is faster.
+        if sys.platform == 'darwin':
+            target = None
+        else:
+            target = unconnected[self._auto_scan_addr_index % len(unconnected)]
+            self._auto_scan_addr_index += 1
 
         self._auto_scan_pending = True
         self._auto_scan_slot = slot_idx
