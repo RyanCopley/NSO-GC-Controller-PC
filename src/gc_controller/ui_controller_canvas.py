@@ -41,7 +41,7 @@ class GCControllerVisual:
     CSTICK_GATE_RADIUS = 23     # c-stick movement range (SVG r=59.7 scaled)
     STICK_DOT_RADIUS = 5
     STICK_IMG_MOVE = 8              # max px offset for left stick image tilt
-    CSTICK_IMG_MOVE = 6             # max px offset for C-stick image tilt
+    CSTICK_IMG_MOVE = 16            # max px offset for C-stick image tilt
 
     # ── Trigger bar geometry (positioned above controller image) ──────
     TRIGGER_L_X, TRIGGER_L_Y = 45, 2
@@ -403,6 +403,16 @@ class GCControllerVisual:
             color = self.LED_COLOR_ON if (i + 1) <= player_num else self.LED_COLOR_OFF
             self.canvas.itemconfigure(self._led_items[i], fill=color)
 
+    def set_single_led(self, led_index: int):
+        """Light exactly one LED, turning all others off.
+
+        Args:
+            led_index: 0–3 index of the LED to light.
+        """
+        for i in range(self.LED_COUNT):
+            color = self.LED_COLOR_ON if i == led_index else self.LED_COLOR_OFF
+            self.canvas.itemconfigure(self._led_items[i], fill=color)
+
     def update_trigger_fill(self, side: str, value_0_255: int):
         """Fill trigger bar proportionally.
 
@@ -483,6 +493,9 @@ class GCControllerVisual:
             points: list of 8 (raw_x, raw_y) tuples.
             cx_raw, rx, cy_raw, ry: calibration center/range values.
         """
+        if not self._calibrating:
+            return
+
         if side == 'left':
             tag = 'lstick'
             canvas_cx, canvas_cy = self.LSTICK_CX, self.LSTICK_CY

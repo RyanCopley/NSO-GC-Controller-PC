@@ -40,10 +40,9 @@ class ControllerSlot:
         self.device_path: Optional[bytes] = None
         self.reconnect_was_emulating = False
 
-        # BLE state
-        self.connection_mode: str = calibration.get('connection_mode', 'usb')
-        self.ble_address: Optional[str] = normalize_ble_address(
-            calibration.get('preferred_ble_address', '') or None)
+        # BLE state (runtime only — not persisted per-slot)
+        self.connection_mode: str = 'usb'
+        self.ble_address: Optional[str] = None
         self.ble_data_queue: queue.Queue = queue.Queue(maxsize=64)
         self.ble_connected: bool = False
 

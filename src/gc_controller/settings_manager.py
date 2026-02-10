@@ -2,36 +2,45 @@
 Settings Manager
 
 Handles loading and saving calibration settings to a JSON file,
-including migration from v1 (single-controller) to v2 (multi-slot) format.
+including migration from v1/v2 (slot-based) to v3 (global-only) format.
+
+v3 format: only global settings + known_ble_devices (per-device calibration).
+No per-slot data is persisted — slots are assigned at runtime.
 """
 
 import json
 import os
 from typing import List
 
-from .controller_constants import DEFAULT_CALIBRATION, MAX_SLOTS
+from .controller_constants import DEFAULT_CALIBRATION, MAX_SLOTS, BLE_DEVICE_CAL_KEYS
 
 
-# Keys that belong in per-slot settings (everything except global keys)
-_GLOBAL_KEYS = {'auto_connect', 'emulation_mode', 'trigger_bump_100_percent', 'minimize_to_tray'}
+# Keys stored in the global section of the config file.
+_GLOBAL_KEYS = {
+    'auto_connect', 'auto_scan_ble', 'emulation_mode', 'trigger_bump_100_percent',
+    'minimize_to_tray', 'known_ble_devices',
+}
 
 
 class SettingsManager:
-    """Manages persistent calibration settings for up to 4 controller slots."""
+    """Manages persistent calibration settings."""
 
     def __init__(self, slot_calibrations: List[dict], settings_dir: str):
         self._slot_calibrations = slot_calibrations
         self._settings_file = os.path.join(settings_dir, 'gc_controller_settings.json')
 
     def load(self):
-        """Load settings from file. Handles v1 (flat) and v2 (multi-slot) formats."""
+        """Load settings from file. Handles v1, v2, and v3 formats."""
         try:
             if not os.path.exists(self._settings_file):
                 return
             with open(self._settings_file, 'r') as f:
                 saved = json.load(f)
 
-            if saved.get('version', 1) >= 2:
+            version = saved.get('version', 1)
+            if version >= 3:
+                self._load_v3(saved)
+            elif version >= 2:
                 self._load_v2(saved)
             else:
                 self._load_v1(saved)
@@ -39,8 +48,7 @@ class SettingsManager:
             print(f"Failed to load settings: {e}")
 
     def _load_v1(self, saved: dict):
-        """Migrate v1 flat settings into slot 0, defaults for others."""
-        # Run key migration for old trigger key names
+        """Migrate v1 flat settings — extract global keys only."""
         key_migration = {
             'left_base': 'trigger_left_base',
             'left_bump': 'trigger_left_bump',
@@ -56,52 +64,60 @@ class SettingsManager:
             elif old_key in saved:
                 del saved[old_key]
 
-        # Apply all v1 data to slot 0
-        self._slot_calibrations[0].update(saved)
-
-        # Copy global keys (auto_connect) to all slots so the orchestrator can read from slot 0
-        # (auto_connect is now a global setting but was stored flat in v1)
+        # Apply only global keys
+        for key in _GLOBAL_KEYS:
+            if key in saved:
+                self._slot_calibrations[0][key] = saved[key]
 
     def _load_v2(self, saved: dict):
-        """Load v2 multi-slot format."""
+        """Migrate v2 multi-slot format — extract global keys + build device registry."""
         global_settings = saved.get('global', {})
         slots_data = saved.get('slots', {})
 
+        # Migrate known_ble_addresses → known_ble_devices
+        old_known = global_settings.pop('known_ble_addresses', [])
+        known_devices = global_settings.get('known_ble_devices', {})
+
+        # Build device entries from per-slot preferred_ble_address + calibration
         for i in range(MAX_SLOTS):
             slot_data = slots_data.get(str(i), {})
-            # Merge global keys into slot 0 for backward compat reading
-            if i == 0:
-                for key in _GLOBAL_KEYS:
-                    if key in global_settings:
-                        slot_data.setdefault(key, global_settings[key])
-            self._slot_calibrations[i].update(slot_data)
+            addr = (slot_data.get('preferred_ble_address', '') or '').upper()
 
-        # Ensure global keys are accessible from slot 0
+            if addr and addr not in known_devices:
+                dev_cal = {}
+                for key in BLE_DEVICE_CAL_KEYS:
+                    if key in slot_data:
+                        dev_cal[key] = slot_data[key]
+                known_devices[addr] = dev_cal
+
+        # Add any addresses from old known_ble_addresses list
+        for addr in old_known:
+            addr_upper = addr.upper()
+            if addr_upper not in known_devices:
+                known_devices[addr_upper] = {}
+
+        global_settings['known_ble_devices'] = known_devices
+
+        # Apply only global keys to slot 0
+        for key in _GLOBAL_KEYS:
+            if key in global_settings:
+                self._slot_calibrations[0][key] = global_settings[key]
+
+    def _load_v3(self, saved: dict):
+        """Load v3 format — global settings only."""
+        global_settings = saved.get('global', {})
         for key in _GLOBAL_KEYS:
             if key in global_settings:
                 self._slot_calibrations[0][key] = global_settings[key]
 
     def save(self):
-        """Write all slot calibrations in v2 format. Raises on failure."""
-        global_settings = {}
-        slots_data = {}
-
-        for i in range(MAX_SLOTS):
-            cal = self._slot_calibrations[i]
-            slot_dict = {}
-            for key, value in cal.items():
-                if key in _GLOBAL_KEYS:
-                    # Only read global keys from slot 0
-                    if i == 0:
-                        global_settings[key] = value
-                else:
-                    slot_dict[key] = value
-            slots_data[str(i)] = slot_dict
+        """Write settings in v3 format (global only). Raises on failure."""
+        cal = self._slot_calibrations[0]
+        global_settings = {key: cal[key] for key in _GLOBAL_KEYS if key in cal}
 
         output = {
-            'version': 2,
+            'version': 3,
             'global': global_settings,
-            'slots': slots_data,
         }
 
         with open(self._settings_file, 'w') as f:

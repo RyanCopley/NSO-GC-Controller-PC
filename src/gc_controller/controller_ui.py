@@ -38,10 +38,7 @@ class SlotUI:
 
 
         # Calibration
-        self.stick_cal_btn = None
-        self.stick_cal_status = None
-        self.trigger_cal_btn = None
-        self.trigger_cal_status = None
+        self.cal_wizard_btn = None
 
 
 class ControllerUI:
@@ -51,13 +48,15 @@ class ControllerUI:
                  slot_calibrations: List[dict],
                  slot_cal_mgrs: List[CalibrationManager],
                  on_connect: Callable[[int], None],
-                 on_stick_cal: Callable[[int], None],
-                 on_trigger_cal: Callable[[int], None],
+                 on_cal_wizard: Callable[[int], None],
                  on_save: Callable,
                  on_pair: Optional[Callable[[int], None]] = None,
                  on_emulate_all: Optional[Callable] = None,
                  on_test_rumble_all: Optional[Callable] = None,
-                 ble_available: bool = False):
+                 ble_available: bool = False,
+                 get_known_ble_devices: Optional[Callable] = None,
+                 on_forget_ble_device: Optional[Callable] = None,
+                 on_auto_save: Optional[Callable] = None):
         self._root = root
         self._slot_calibrations = slot_calibrations
         self._slot_cal_mgrs = slot_cal_mgrs
@@ -75,14 +74,16 @@ class ControllerUI:
         self.emu_mode_var = tk.StringVar(value=emu_default)
         self.trigger_mode_var = tk.BooleanVar(value=slot_calibrations[0]['trigger_bump_100_percent'])
         self.minimize_to_tray_var = tk.BooleanVar(value=slot_calibrations[0].get('minimize_to_tray', False))
+        self.auto_scan_ble_var = tk.BooleanVar(value=slot_calibrations[0].get('auto_scan_ble', True))
 
         # Callbacks for settings dialog
         self._on_emulate_all = on_emulate_all
         self._on_test_rumble_all = on_test_rumble_all
         self._on_save = on_save
+        self._get_known_ble_devices = get_known_ble_devices
+        self._on_forget_ble_device = on_forget_ble_device
+        self._on_auto_save = on_auto_save
 
-        # Dirty (unsaved changes) tracking per slot
-        self._slot_dirty: List[bool] = [False] * MAX_SLOTS
         self._slot_connected: List[bool] = [False] * MAX_SLOTS
         self._slot_emulating: List[bool] = [False] * MAX_SLOTS
         self._initializing = True
@@ -93,16 +94,20 @@ class ControllerUI:
         # Tab name tracking for CTkTabview rename
         self._tab_names: List[str] = []
 
+        # BLE scanning LED animation state
+        self._ble_scan_anim_active = False
+        self._ble_scan_anim_step = 0
+        self._ble_scan_anim_timer_id = None
+        self._BLE_SCAN_LED_SEQ = [0, 1, 2, 3, 2, 1]  # bounce pattern
+
         self.slots: List[SlotUI] = []
-        self._setup(on_connect, on_stick_cal, on_trigger_cal, on_save,
-                    on_pair)
+        self._setup(on_connect, on_cal_wizard, on_save, on_pair)
 
         self._initializing = False
 
     # ── Setup ────────────────────────────────────────────────────────
 
-    def _setup(self, on_connect, on_stick_cal, on_trigger_cal, on_save,
-               on_pair=None):
+    def _setup(self, on_connect, on_cal_wizard, on_save, on_pair=None):
         """Create the user interface with tabview tabs."""
         outer_frame = customtkinter.CTkFrame(self._root, fg_color="transparent")
         outer_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
@@ -141,13 +146,6 @@ class ControllerUI:
         icon_frame.place(relx=1.0, y=0, anchor="ne")
 
         customtkinter.CTkButton(
-            icon_frame, text="\U0001F5AB",
-            command=on_save,
-            width=40, height=40, font=("", 24),
-            **icon_base,
-        ).pack(side=tk.LEFT, padx=(0, 4))
-
-        customtkinter.CTkButton(
             icon_frame, text="\u2699",
             command=self.open_settings,
             width=40, height=40, font=("", 24),
@@ -161,17 +159,27 @@ class ControllerUI:
 
             slot_ui = SlotUI()
             self._build_tab(i, slot_ui, on_connect,
-                            on_stick_cal, on_trigger_cal, on_pair)
+                            on_cal_wizard, on_pair)
             self.slots.append(slot_ui)
 
-        # Track global setting changes
-        self.auto_connect_var.trace_add('write', lambda *_: self.mark_slot_dirty(0))
-        self.emu_mode_var.trace_add('write', lambda *_: self.mark_slot_dirty(0))
-        self.trigger_mode_var.trace_add('write', lambda *_: self.mark_slot_dirty(0))
-        self.minimize_to_tray_var.trace_add('write', lambda *_: self.mark_slot_dirty(0))
+        # Track global setting changes — auto-save when changed
+        def _on_setting_changed(*_):
+            if not self._initializing and self._on_auto_save:
+                self._on_auto_save()
+        def _on_auto_connect_changed(*_):
+            if not self._initializing:
+                for i in range(len(self.slots)):
+                    self._update_connect_btn_visibility(i)
+
+        self.auto_connect_var.trace_add('write', _on_setting_changed)
+        self.auto_connect_var.trace_add('write', _on_auto_connect_changed)
+        self.emu_mode_var.trace_add('write', _on_setting_changed)
+        self.trigger_mode_var.trace_add('write', _on_setting_changed)
+        self.minimize_to_tray_var.trace_add('write', _on_setting_changed)
+        self.auto_scan_ble_var.trace_add('write', _on_setting_changed)
 
     def _build_tab(self, index: int, slot_ui: SlotUI,
-                   on_connect, on_stick_cal, on_trigger_cal,
+                   on_connect, on_cal_wizard,
                    on_pair=None):
         """Build one controller tab."""
         tab_name = self._tab_names[index]
@@ -188,7 +196,7 @@ class ControllerUI:
         slot_ui.controller_visual.pack(padx=8, pady=(8, 0))
 
         slot_ui.status_label = customtkinter.CTkLabel(
-            visual_frame, text="Ready to connect",
+            visual_frame, text="Ready to Connect",
             text_color="#FFFFFF", font=(T.FONT_FAMILY, 14),
             anchor="center",
         )
@@ -223,37 +231,23 @@ class ControllerUI:
             command=lambda i=index: on_connect(i),
             **btn_kwargs,
         )
-        slot_ui.connect_btn.pack(side=tk.LEFT, padx=(0, 4), expand=True, fill=tk.X)
+        if not self.auto_connect_var.get():
+            slot_ui.connect_btn.pack(side=tk.LEFT, padx=(0, 4), expand=True, fill=tk.X)
 
         if self._ble_available and on_pair:
             slot_ui.pair_btn = customtkinter.CTkButton(
-                btn_frame, text="Connect Wireless",
+                btn_frame, text="Pair New Wireless Controller",
                 command=lambda i=index: on_pair(i),
                 **btn_kwargs,
             )
             slot_ui.pair_btn.pack(side=tk.LEFT, padx=4, expand=True, fill=tk.X)
 
-        slot_ui.stick_cal_btn = customtkinter.CTkButton(
-            btn_frame, text="Calibrate Sticks",
-            command=lambda i=index: on_stick_cal(i),
+        slot_ui.cal_wizard_btn = customtkinter.CTkButton(
+            btn_frame, text="Calibration Wizard",
+            command=lambda i=index: on_cal_wizard(i),
             **btn_kwargs,
         )
-        slot_ui.stick_cal_btn.pack(side=tk.LEFT, padx=4, expand=True, fill=tk.X)
-
-        slot_ui.trigger_cal_btn = customtkinter.CTkButton(
-            btn_frame, text="Calibrate Triggers",
-            command=lambda i=index: on_trigger_cal(i),
-            **btn_kwargs,
-        )
-        slot_ui.trigger_cal_btn.pack(side=tk.LEFT, padx=(4, 0), expand=True, fill=tk.X)
-
-        # Hidden status labels for calibration feedback
-        slot_ui.stick_cal_status = customtkinter.CTkLabel(
-            btn_frame, text="", text_color=T.TEXT_DIM, font=(T.FONT_FAMILY, 12),
-        )
-        slot_ui.trigger_cal_status = customtkinter.CTkLabel(
-            btn_frame, text="", text_color=T.TEXT_DIM, font=(T.FONT_FAMILY, 12),
-        )
+        slot_ui.cal_wizard_btn.pack(side=tk.LEFT, padx=(4, 0), expand=True, fill=tk.X)
 
         # Configure grid weights
         tab.grid_columnconfigure(0, weight=1)
@@ -269,11 +263,14 @@ class ControllerUI:
             trigger_mode_var=self.trigger_mode_var,
             auto_connect_var=self.auto_connect_var,
             minimize_to_tray_var=self.minimize_to_tray_var,
+            auto_scan_ble_var=self.auto_scan_ble_var,
             on_emulate_all=self._on_emulate_all if self._on_emulate_all else lambda: None,
             on_test_rumble_all=self._on_test_rumble_all if self._on_test_rumble_all else lambda: None,
             is_any_emulating=lambda: any(self._slot_emulating),
             is_any_connected=lambda: any(self._slot_connected),
             on_save=self._on_save,
+            get_known_ble_devices=self._get_known_ble_devices,
+            on_forget_ble_device=self._on_forget_ble_device,
         )
 
     # ── UI update methods ────────────────────────────────────────────
@@ -345,17 +342,27 @@ class ControllerUI:
         self._slot_connected[slot_index] = connected
         self._slot_emulating[slot_index] = emulating
         self._refresh_tab_title(slot_index)
+        self._update_connect_btn_visibility(slot_index)
 
         # Update player LED indicators
         s = self.slots[slot_index]
         s.controller_visual.update_player_leds(slot_index + 1 if connected else 0)
 
+    def _update_connect_btn_visibility(self, slot_index: int):
+        """Show/hide the Connect USB button based on auto-connect setting."""
+        s = self.slots[slot_index]
+
+        if self.auto_connect_var.get():
+            s.connect_btn.pack_forget()
+        elif not s.connect_btn.winfo_ismapped():
+            before = s.pair_btn if s.pair_btn and s.pair_btn.winfo_ismapped() else s.cal_wizard_btn
+            s.connect_btn.pack(side=tk.LEFT, padx=(0, 4), expand=True, fill=tk.X, before=before)
+
     def _refresh_tab_title(self, slot_index: int):
-        """Rebuild tab title from connection, emulation, and dirty state."""
+        """Rebuild tab title from connection state."""
         prefix = "\u2713 " if self._slot_connected[slot_index] else ""
         base = f"Controller {slot_index + 1}"
-        dirty = " *" if self._slot_dirty[slot_index] else ""
-        new_name = prefix + base + dirty
+        new_name = prefix + base
         old_name = self._tab_names[slot_index]
 
         if new_name != old_name:
@@ -368,19 +375,39 @@ class ControllerUI:
             except Exception:
                 pass
 
-    def mark_slot_dirty(self, slot_index: int):
-        """Mark a slot as having unsaved changes."""
-        if self._initializing:
-            return
-        if not self._slot_dirty[slot_index]:
-            self._slot_dirty[slot_index] = True
-            self._refresh_tab_title(slot_index)
+    # ── BLE scanning LED animation ────────────────────────────────────
 
-    def mark_all_clean(self):
-        """Clear unsaved-changes indicators on all slots."""
-        self._slot_dirty = [False] * MAX_SLOTS
+    def set_ble_scanning(self, active: bool):
+        """Start or stop the BLE scanning LED bounce animation."""
+        if active and not self._ble_scan_anim_active:
+            self._ble_scan_anim_active = True
+            self._ble_scan_anim_step = 0
+            self._ble_scan_anim_tick()
+        elif not active and self._ble_scan_anim_active:
+            self._ble_scan_anim_active = False
+            if self._ble_scan_anim_timer_id is not None:
+                self._root.after_cancel(self._ble_scan_anim_timer_id)
+                self._ble_scan_anim_timer_id = None
+            # Restore correct LED state on all non-connected slots
+            for i in range(MAX_SLOTS):
+                if not self._slot_connected[i]:
+                    self.slots[i].controller_visual.update_player_leds(0)
+
+    def _ble_scan_anim_tick(self):
+        """Advance the bounce animation one step on all visible non-connected slots."""
+        if not self._ble_scan_anim_active:
+            return
+
+        led_index = self._BLE_SCAN_LED_SEQ[self._ble_scan_anim_step % len(self._BLE_SCAN_LED_SEQ)]
+
+        # Only animate the first non-connected slot
         for i in range(MAX_SLOTS):
-            self._refresh_tab_title(i)
+            if not self._slot_connected[i]:
+                self.slots[i].controller_visual.set_single_led(led_index)
+                break
+
+        self._ble_scan_anim_step += 1
+        self._ble_scan_anim_timer_id = self._root.after(100, self._ble_scan_anim_tick)
 
     # ── Reset ────────────────────────────────────────────────────────
 

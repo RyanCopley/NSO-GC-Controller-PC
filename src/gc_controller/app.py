@@ -99,6 +99,10 @@ class GCControllerEnabler:
         self.settings_mgr = SettingsManager(self.slot_calibrations, os.getcwd())
         self.settings_mgr.load()
 
+        # Ensure known_ble_devices exists in global config (slot 0)
+        if 'known_ble_devices' not in self.slot_calibrations[0]:
+            self.slot_calibrations[0]['known_ble_devices'] = {}
+
         # Create slots (each with own managers)
         self.slots: list[ControllerSlot] = []
         for i in range(MAX_SLOTS):
@@ -127,7 +131,19 @@ class GCControllerEnabler:
         self._ble_initialized = False
         self._ble_init_event = threading.Event()
         self._ble_init_result = None
-        self._ble_pair_mode = {}  # slot_index -> 'pair' | 'reconnect'
+        self._ble_pair_mode = {}  # slot_index -> 'pair' | 'reconnect' | 'autoscan'
+        self._diff_scan_callback = {}  # slot_index -> completion callback
+        self._ble_known_scan_slot = None  # slot being scanned for known-addr matching
+
+        # Auto-scan state
+        self._auto_scan_active = False
+        self._auto_scan_timer_id = None
+        self._auto_scan_pending = False   # True while a scan_connect is in-flight for auto-scan
+        self._auto_scan_slot = None       # slot_index used for current auto-scan command
+        self._auto_scan_addr_index = 0   # round-robin index for known address targeting
+        self._ble_init_in_progress = False
+
+        self._ble_init_retry_count = 0
 
         # UI — pass list of cal_mgrs for live octagon drawing
         self.ui = ControllerUI(
@@ -135,13 +151,17 @@ class GCControllerEnabler:
             slot_calibrations=self.slot_calibrations,
             slot_cal_mgrs=[s.cal_mgr for s in self.slots],
             on_connect=self.connect_controller,
-            on_stick_cal=self.toggle_stick_calibration,
-            on_trigger_cal=self.trigger_cal_step,
+            on_cal_wizard=self.calibration_wizard_step,
             on_save=self.save_settings,
             on_pair=self.pair_controller if self._ble_available else None,
             on_emulate_all=self.toggle_emulation_all,
             on_test_rumble_all=self.test_rumble_all,
             ble_available=self._ble_available,
+            get_known_ble_devices=(self._get_known_ble_devices
+                                  if self._ble_available else None),
+            on_forget_ble_device=(self._forget_ble_device
+                                 if self._ble_available else None),
+            on_auto_save=self._auto_save,
         )
 
         # Now that UI is built, draw initial trigger markers for all slots
@@ -167,6 +187,10 @@ class GCControllerEnabler:
         # Auto-connect if enabled
         if self.slot_calibrations[0]['auto_connect']:
             self.root.after(100, self.auto_connect_and_emulate)
+
+        # Auto-init BLE if we have known addresses and auto-scan is enabled
+        if self._ble_available and self._get_known_ble_addresses() and self.slot_calibrations[0].get('auto_scan_ble', True):
+            self.root.after(500, self._init_ble_async)
 
     # ── Connection ───────────────────────────────────────────────────
 
@@ -206,12 +230,9 @@ class GCControllerEnabler:
 
         slot.device_path = target_path
 
-        # Save the path as the preferred device for this slot
+        # Save the path as the preferred device for this slot (runtime only)
         path_str = target_path.decode('utf-8', errors='replace')
-        old_pref = self.slot_calibrations[slot_index].get('preferred_device_path', '')
         self.slot_calibrations[slot_index]['preferred_device_path'] = path_str
-        if path_str != old_pref:
-            self.ui.mark_slot_dirty(slot_index)
 
         slot.input_proc.start()
 
@@ -220,6 +241,10 @@ class GCControllerEnabler:
             sui.pair_btn.configure(state='disabled')
         self.ui.update_tab_status(slot_index, connected=True, emulating=False)
         self.toggle_emulation(slot_index)
+
+        # Auto-start calibration wizard for uncalibrated controllers
+        if self._needs_calibration(slot_index):
+            self.root.after(500, lambda si=slot_index: self._start_auto_calibration(si))
 
     def _reset_rumble(self, slot_index: int):
         """Send rumble OFF if currently ON and reset rumble state."""
@@ -257,7 +282,7 @@ class GCControllerEnabler:
         sui.connect_btn.configure(text="Connect USB")
         if sui.pair_btn:
             sui.pair_btn.configure(state='normal')
-        self.ui.update_status(slot_index, "Disconnected")
+        self.ui.update_status(slot_index, "Ready to Connect")
         self.ui.reset_slot_ui(slot_index)
         self.ui.update_tab_status(slot_index, connected=False, emulating=False)
 
@@ -387,12 +412,16 @@ class GCControllerEnabler:
         si = event.get('s')
 
         if etype == 'status' and si is not None:
-            self.ui.update_ble_status(si, event.get('msg', ''))
+            # Suppress status updates for background auto-scan
+            if self._ble_pair_mode.get(si) != 'autoscan':
+                self.ui.update_ble_status(si, event.get('msg', ''))
 
         elif etype == 'connected' and si is not None:
             mac = event.get('mac')
             mode = self._ble_pair_mode.pop(si, 'pair')
-            if mode == 'pair':
+            if mode == 'autoscan':
+                self._on_auto_scan_connected(si, mac)
+            elif mode == 'pair':
                 self._on_pair_complete(si, mac)
             else:
                 self._on_reconnect_complete(si, mac)
@@ -400,7 +429,9 @@ class GCControllerEnabler:
         elif etype == 'connect_error' and si is not None:
             msg = event.get('msg', 'Connection failed')
             mode = self._ble_pair_mode.pop(si, 'pair')
-            if mode == 'pair':
+            if mode == 'autoscan':
+                self._on_auto_scan_failed(si, msg)
+            elif mode == 'pair':
                 self._on_pair_complete(si, None, error=msg)
             else:
                 self.root.after(
@@ -428,6 +459,14 @@ class GCControllerEnabler:
         """
         if self._ble_initialized:
             return True
+
+        # If async init is running, wait for it instead of starting a second subprocess
+        if self._ble_init_in_progress:
+            deadline = time.monotonic() + 30
+            while self._ble_init_in_progress and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(0.1)
+            return self._ble_initialized
 
         if sys.platform == 'linux' and not shutil.which('pkexec'):
             self._messagebox.showerror(
@@ -476,28 +515,119 @@ class GCControllerEnabler:
         self._ble_initialized = True
         return True
 
-    def pair_controller(self, slot_index: int):
-        """Start BLE pairing for a controller slot.
+    def _init_ble_async(self):
+        """Non-blocking BLE init. Runs the full init sequence in a background thread.
 
-        Two flows:
-        - Saved address exists: send scan_connect (scan-first with early stop)
-        - No saved address: send scan_devices, show picker, then connect_device
+        On completion, posts _on_ble_init_complete() to the main thread.
+        On Linux this triggers pkexec for elevated privileges.
+        """
+        if self._ble_initialized or self._ble_init_in_progress:
+            if self._ble_initialized:
+                self._start_auto_scan()
+            return
+
+        self._ble_init_in_progress = True
+
+        def _bg_init():
+            try:
+                success = self._init_ble_background()
+                self.root.after(0, lambda: self._on_ble_init_complete(success))
+            except Exception:
+                self.root.after(0, lambda: self._on_ble_init_complete(False))
+
+        threading.Thread(target=_bg_init, daemon=True).start()
+
+    def _init_ble_background(self) -> bool:
+        """Run the full BLE init sequence (blocking). Called from background thread.
+
+        Same as _init_ble() but without messagebox error dialogs (silent for auto-init).
+        """
+        if sys.platform == 'linux' and not shutil.which('pkexec'):
+            return False
+
+        try:
+            self._start_ble_subprocess()
+        except Exception:
+            return False
+
+        # Wait for subprocess to start
+        result = self._wait_ble_init(timeout=60)
+        if not result or result.get('e') != 'ready':
+            self._cleanup_ble()
+            return False
+
+        # Stop BlueZ (Linux only — must release HCI adapter for Bumble)
+        self._send_ble_cmd({"cmd": "stop_bluez"})
+        result = self._wait_ble_init(timeout=15)
+        if not result or result.get('e') != 'bluez_stopped':
+            self._cleanup_ble()
+            return False
+
+        # Open HCI adapter
+        self._send_ble_cmd({"cmd": "open"})
+        result = self._wait_ble_init(timeout=15)
+        if not result or result.get('e') == 'error':
+            self._cleanup_ble()
+            return False
+
+        self._ble_initialized = True
+        return True
+
+    def _on_ble_init_complete(self, success: bool):
+        """Handle completion of async BLE init on the main thread."""
+        self._ble_init_in_progress = False
+
+        if success:
+            self._ble_init_retry_count = 0
+            self._start_auto_scan()
+        else:
+            self._ble_init_retry_count += 1
+            if self._ble_init_retry_count < 3 and self.slot_calibrations[0].get('auto_scan_ble', True):
+                # Retry after 30s
+                self.root.after(30000, self._init_ble_async)
+
+    def pair_controller(self, slot_index: int):
+        """Start BLE pairing to discover a NEW controller.
+
+        Auto-scan handles reconnection to known controllers in the background.
+        This button is exclusively for discovering new controllers:
+        - macOS/Windows: launch differential scan wizard
+        - Linux: scan_connect without target (discover any Nintendo controller)
+
+        Always fills the first available slot regardless of which tab's button
+        was clicked. If the clicked slot is BLE-connected, disconnects it instead.
         """
         slot = self.slots[slot_index]
-        sui = self.ui.slots[slot_index]
 
-        # If already BLE-connected, disconnect
+        # If already BLE-connected on this slot, disconnect
         if slot.ble_connected:
             self._disconnect_ble(slot_index)
             return
 
-        # If USB-connected, disconnect USB first
+        # Redirect to the first available slot
+        target_slot = None
+        for i in range(MAX_SLOTS):
+            if not self.slots[i].is_connected and i not in self._ble_pair_mode:
+                target_slot = i
+                break
+        if target_slot is None:
+            self.ui.update_status(slot_index, "No free slots available")
+            return
+        slot_index = target_slot
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        # If USB-connected on target slot, disconnect USB first
         if slot.is_connected and slot.connection_mode == 'usb':
             self.disconnect_controller(slot_index)
 
         # Init BLE subsystem
         if not self._init_ble():
             return
+
+        # Start auto-scan if not already active (first manual pair initializes it)
+        if not self._auto_scan_active:
+            self._start_auto_scan()
 
         # Disable pair button during pairing
         if sui.pair_btn:
@@ -511,29 +641,47 @@ class GCControllerEnabler:
             except Exception:
                 break
 
-        import re
-        target_addr = normalize_ble_address(
-            slot.ble_address if slot.ble_address else None)
+        # Build exclude list of already-connected BLE addresses
+        exclude = []
+        for s in self.slots:
+            if s.ble_connected and s.ble_address:
+                exclude.append(s.ble_address.upper())
 
-        # On macOS, CoreBluetooth uses UUIDs — a saved MAC from Linux
-        # will never match, so treat it as no saved address (show picker).
-        _mac_re = re.compile(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
-        if (target_addr and sys.platform == 'darwin'
-                and _mac_re.match(target_addr)):
-            target_addr = None
+        # macOS/Windows: launch wizard to discover a new controller
+        if sys.platform != 'linux':
+            self._show_diff_scan_wizard(slot_index)
+            return
 
-        # Always use scan_connect: with a target address it stops as soon
-        # as the device is found; without one it scans briefly then tries
-        # each Nintendo-like device via handshake (auto-identify).
+        # Linux: scan_connect without target (auto-identify via handshake)
         self._ble_pair_mode[slot_index] = 'pair'
         self._send_ble_cmd({
             "cmd": "scan_connect",
             "slot_index": slot_index,
-            "target_address": target_addr,
+            "target_address": None,
+            "exclude_addresses": exclude if exclude else None,
         })
 
     def _on_devices_found(self, slot_index: int, devices: list[dict]):
-        """Handle devices_found event: show picker dialog, then connect."""
+        """Handle devices_found event.
+
+        Routes to:
+        - Diff scan wizard completion callback (if active)
+        - Known-address matching logic (if scanning for known addresses)
+        - Original picker dialog (fallback)
+        """
+        # Route to wizard completion callback if one is active
+        cb = self._diff_scan_callback.pop(slot_index, None)
+        if cb is not None:
+            cb(devices)
+            return
+
+        # Route to known-address matching logic
+        if self._ble_known_scan_slot == slot_index:
+            self._ble_known_scan_slot = None
+            self._on_known_scan_result(slot_index, devices)
+            return
+
+        # Original picker fallback
         from .ui_ble_dialog import BLEDevicePickerDialog
 
         sui = self.ui.slots[slot_index]
@@ -574,12 +722,9 @@ class GCControllerEnabler:
             slot.ble_address = mac
             slot.connection_mode = 'ble'
 
-            # Save address
-            old_addr = self.slot_calibrations[slot_index].get('preferred_ble_address', '')
-            self.slot_calibrations[slot_index]['preferred_ble_address'] = mac
-            self.slot_calibrations[slot_index]['connection_mode'] = 'ble'
-            if mac != old_addr:
-                self.ui.mark_slot_dirty(slot_index)
+            # Register device and load its calibration into this slot
+            self._add_known_ble_device(mac)
+            self._load_device_calibration(slot_index, mac)
 
             # Start input processor in BLE mode
             slot.input_proc.start(mode='ble')
@@ -591,6 +736,14 @@ class GCControllerEnabler:
             self.ui.update_status(slot_index, "Connected via BLE")
             self.ui.update_tab_status(slot_index, connected=True, emulating=False)
             self.toggle_emulation(slot_index)
+
+            # Auto-start calibration wizard for uncalibrated controllers
+            if self._needs_calibration(slot_index):
+                self.root.after(500, lambda si=slot_index: self._start_auto_calibration(si))
+
+            # Ensure auto-scan is running after successful pair
+            if not self._auto_scan_active and self._ble_initialized:
+                self._start_auto_scan()
         else:
             if sui.pair_btn:
                 sui.pair_btn.configure(state='normal')
@@ -598,10 +751,333 @@ class GCControllerEnabler:
                 self.ui.update_ble_status(slot_index, f"Error: {error}")
             # Status was already set by on_status callback
 
+    def _get_known_ble_devices(self) -> dict:
+        """Return the global known BLE devices registry {mac: calibration_dict}."""
+        return self.slot_calibrations[0].get('known_ble_devices', {})
+
+    def _get_known_ble_addresses(self) -> list[str]:
+        """Return list of known BLE MAC addresses (derived from device registry)."""
+        return list(self._get_known_ble_devices().keys())
+
+    def _add_known_ble_device(self, address: str):
+        """Add a BLE device to the known registry (creates entry if new)."""
+        devices = self.slot_calibrations[0].setdefault('known_ble_devices', {})
+        addr_upper = address.upper()
+        if addr_upper not in devices:
+            devices[addr_upper] = {}
+            self._auto_save()
+
+    def _save_device_calibration(self, slot_index: int, mac: str):
+        """Copy per-device calibration keys from a slot into the device registry."""
+        from .controller_constants import BLE_DEVICE_CAL_KEYS
+        devices = self.slot_calibrations[0].setdefault('known_ble_devices', {})
+        addr_upper = mac.upper()
+        dev_cal = devices.setdefault(addr_upper, {})
+        cal = self.slot_calibrations[slot_index]
+        for key in BLE_DEVICE_CAL_KEYS:
+            if key in cal:
+                dev_cal[key] = cal[key]
+
+    def _load_device_calibration(self, slot_index: int, mac: str):
+        """Load per-device calibration from the device registry into a slot."""
+        from .controller_constants import BLE_DEVICE_CAL_KEYS
+        devices = self._get_known_ble_devices()
+        dev_cal = devices.get(mac.upper(), {})
+        cal = self.slot_calibrations[slot_index]
+        for key in BLE_DEVICE_CAL_KEYS:
+            if key in dev_cal:
+                cal[key] = dev_cal[key]
+        # Refresh the CalibrationManager cache with new values
+        self.slots[slot_index].cal_mgr.refresh_cache()
+        # Redraw octagon and trigger markers with device's calibration
+        self.ui.redraw_octagons(slot_index)
+        self.ui.draw_trigger_markers(slot_index)
+
+    def _forget_ble_device(self, mac: str):
+        """Remove a single BLE device from the known registry."""
+        devices = self.slot_calibrations[0].get('known_ble_devices', {})
+        addr_upper = mac.upper()
+        if addr_upper in devices:
+            del devices[addr_upper]
+            self._auto_save()
+            # Disconnect if this device is currently connected on any slot
+            for slot in self.slots:
+                if slot.ble_address and slot.ble_address.upper() == addr_upper:
+                    self.root.after(0, lambda s=slot: self.disconnect_controller(s.index))
+            # Stop auto-scan if no known devices remain
+            if not devices:
+                self._stop_auto_scan()
+
+    def _clear_known_ble_devices(self):
+        """Remove all known BLE devices and stop auto-scan."""
+        self.slot_calibrations[0]['known_ble_devices'] = {}
+        self._auto_save()
+        self._stop_auto_scan()
+
+    def _try_known_addresses_scan(self, slot_index: int):
+        """Scan once and check if any known address is advertising."""
+        self._ble_known_scan_slot = slot_index
+        self.ui.update_ble_status(slot_index, "Scanning for known controllers...")
+        self._send_ble_cmd({
+            "cmd": "scan_devices",
+            "slot_index": slot_index,
+        })
+
+    def _on_known_scan_result(self, slot_index: int, devices: list[dict]):
+        """Handle scan results when checking for known addresses."""
+        known = set(a.upper() for a in self._get_known_ble_addresses())
+        found_addresses = {d['address'].upper() for d in devices}
+
+        match = known & found_addresses
+        if match:
+            # Connect to the first matching known address
+            addr = next(iter(match))
+            self.ui.update_ble_status(slot_index, f"Found known controller: {addr}")
+            self._ble_pair_mode[slot_index] = 'pair'
+            self._send_ble_cmd({
+                "cmd": "connect_device",
+                "slot_index": slot_index,
+                "address": addr,
+            })
+        else:
+            # No known address found — fall through to wizard
+            self._show_diff_scan_wizard(slot_index)
+
+    def _show_diff_scan_wizard(self, slot_index: int):
+        """Launch the differential scan wizard."""
+        from .ui_ble_scan_wizard import BLEScanWizard
+
+        def on_scan(completion_cb):
+            """Wire the wizard's scan request to the BLE subprocess."""
+            self._diff_scan_callback[slot_index] = completion_cb
+            self._send_ble_cmd({
+                "cmd": "scan_devices",
+                "slot_index": slot_index,
+            })
+
+        wizard = BLEScanWizard(self.root, on_scan=on_scan)
+        chosen_address = wizard.show()
+
+        # Clean up any leftover callback
+        self._diff_scan_callback.pop(slot_index, None)
+
+        sui = self.ui.slots[slot_index]
+
+        if not chosen_address:
+            # Wizard cancelled
+            self.ui.update_ble_status(slot_index, "Pairing cancelled")
+            if sui.pair_btn:
+                sui.pair_btn.configure(state='normal')
+            return
+
+        # Connect to the chosen device
+        self.ui.update_ble_status(slot_index, "Connecting...")
+        self._ble_pair_mode[slot_index] = 'pair'
+        self._send_ble_cmd({
+            "cmd": "connect_device",
+            "slot_index": slot_index,
+            "address": chosen_address,
+        })
+
+    # ── Auto-scan loop ─────────────────────────────────────────────
+
+    def _start_auto_scan(self):
+        """Begin the periodic auto-scan loop for known BLE controllers."""
+        if self._auto_scan_active:
+            return
+        self._auto_scan_active = True
+        self.ui.set_ble_scanning(True)
+        self._auto_scan_tick()
+
+    def _stop_auto_scan(self):
+        """Stop the periodic auto-scan loop."""
+        self._auto_scan_active = False
+        self.ui.set_ble_scanning(False)
+        if self._auto_scan_timer_id is not None:
+            self.root.after_cancel(self._auto_scan_timer_id)
+            self._auto_scan_timer_id = None
+
+    def _ensure_auto_scan(self, delay_ms: int = 0):
+        """Ensure auto-scan is running. Reschedule the next tick if already active."""
+        if not self._ble_initialized or not self._get_known_ble_addresses():
+            return
+        if self._auto_scan_active:
+            # Cancel existing timer and reschedule sooner
+            if self._auto_scan_timer_id is not None:
+                self.root.after_cancel(self._auto_scan_timer_id)
+            self._auto_scan_timer_id = self.root.after(
+                delay_ms, self._auto_scan_tick)
+        else:
+            self._auto_scan_active = True
+            self.ui.set_ble_scanning(True)
+            self._auto_scan_timer_id = self.root.after(
+                delay_ms, self._auto_scan_tick)
+
+    def _auto_scan_tick(self):
+        """Periodic callback: scan for any known BLE controller.
+
+        On Windows/Linux, targets a specific known address (round-robin) so
+        the Bleak backend can direct-connect to bonded devices invisible to
+        scans.  On macOS, uses a blind scan (no target) since CoreBluetooth
+        peripheral cache is unreliable — handshake identification works better.
+        """
+        self._auto_scan_timer_id = None
+
+        if not self._auto_scan_active or not self._ble_initialized:
+            return
+
+        # Don't scan while another auto-scan is in-flight
+        if self._auto_scan_pending:
+            self._auto_scan_timer_id = self.root.after(
+                5000, self._auto_scan_tick)
+            return
+
+        # Don't scan while a manual pair or reconnect is active
+        active_modes = set(self._ble_pair_mode.values())
+        if active_modes - {'autoscan'}:
+            self._auto_scan_timer_id = self.root.after(
+                5000, self._auto_scan_tick)
+            return
+
+        # Must have known addresses to auto-scan
+        known = self._get_known_ble_addresses()
+        if not known:
+            self._auto_scan_timer_id = self.root.after(
+                10000, self._auto_scan_tick)
+            return
+
+        # Build set of already-connected BLE addresses
+        connected_addrs = set()
+        for s in self.slots:
+            if s.ble_connected and s.ble_address:
+                connected_addrs.add(s.ble_address.upper())
+
+        # Check if all known controllers are already connected
+        unconnected = [a for a in known if a.upper() not in connected_addrs]
+        if not unconnected:
+            self._auto_scan_timer_id = self.root.after(
+                10000, self._auto_scan_tick)
+            return
+
+        # Need a free slot
+        slot_idx = self._pick_auto_scan_slot()
+        if slot_idx is None:
+            self._auto_scan_timer_id = self.root.after(
+                10000, self._auto_scan_tick)
+            return
+
+        # Drain stale data from slot queue
+        slot = self.slots[slot_idx]
+        while not slot.ble_data_queue.empty():
+            try:
+                slot.ble_data_queue.get_nowait()
+            except Exception:
+                break
+
+        # On Windows, bonded devices are invisible to BLE scans — target
+        # a specific known address so the Bleak backend will attempt a
+        # direct connection when the target is not found in scan results.
+        # On macOS, CoreBluetooth's peripheral cache is unreliable, so a
+        # blind scan (no target) with handshake identification works better.
+        # On Linux (Bumble), a target address skips scanning and connects
+        # directly, which is faster.
+        if sys.platform == 'darwin':
+            target = None
+        else:
+            target = unconnected[self._auto_scan_addr_index % len(unconnected)]
+            self._auto_scan_addr_index += 1
+
+        self._auto_scan_pending = True
+        self._auto_scan_slot = slot_idx
+        self._ble_pair_mode[slot_idx] = 'autoscan'
+        self._send_ble_cmd({
+            "cmd": "scan_connect",
+            "slot_index": slot_idx,
+            "target_address": target,
+            "exclude_addresses": list(connected_addrs),
+        })
+
+    def _pick_auto_scan_slot(self):
+        """Pick the first free slot for auto-scan. Returns slot index or None."""
+        for i in range(MAX_SLOTS):
+            if not self.slots[i].is_connected and i not in self._ble_pair_mode:
+                return i
+        return None
+
+    def _on_auto_scan_connected(self, slot_index: int, mac: str):
+        """Handle successful auto-scan connection.
+
+        Verifies the connected MAC is in the known list. If it's an unknown
+        controller, disconnects it (user must use Pair for new controllers).
+        """
+        self._auto_scan_pending = False
+        self._auto_scan_slot = None
+
+        # Verify the connected controller is known
+        known_upper = set(a.upper() for a in self._get_known_ble_addresses())
+        if mac and mac.upper() not in known_upper:
+            # Unknown controller — disconnect and retry
+            self._send_ble_cmd({
+                "cmd": "disconnect",
+                "slot_index": slot_index,
+                "address": mac,
+            })
+            if self._auto_scan_active:
+                self._auto_scan_timer_id = self.root.after(
+                    5000, self._auto_scan_tick)
+            return
+
+        slot = self.slots[slot_index]
+        sui = self.ui.slots[slot_index]
+
+        slot.ble_connected = True
+        slot.ble_address = mac
+        slot.connection_mode = 'ble'
+
+        # Load device's calibration into this slot
+        self._add_known_ble_device(mac)
+        self._load_device_calibration(slot_index, mac)
+
+        # Start input processor in BLE mode
+        slot.input_proc.start(mode='ble')
+
+        if sui.pair_btn:
+            sui.pair_btn.configure(text="Disconnect", state='normal')
+        sui.connect_btn.configure(state='disabled')
+        self.ui.update_status(slot_index, "Auto-connected via BLE")
+        self.ui.update_ble_status(slot_index, f"Connected: {mac}")
+        self.ui.update_tab_status(
+            slot_index, connected=True, emulating=False)
+        self.toggle_emulation(slot_index)
+
+        # Look for more controllers soon
+        if self._auto_scan_active:
+            self._auto_scan_timer_id = self.root.after(
+                3000, self._auto_scan_tick)
+
+    def _on_auto_scan_failed(self, slot_index: int, msg: str):
+        """Handle failed auto-scan attempt (silent — controller may be off)."""
+        self._auto_scan_pending = False
+        self._auto_scan_slot = None
+
+        # Re-enable pair button if it was disabled
+        sui = self.ui.slots[slot_index]
+        if sui.pair_btn and not self.slots[slot_index].ble_connected:
+            sui.pair_btn.configure(state='normal')
+
+        # Schedule next tick
+        if self._auto_scan_active:
+            self._auto_scan_timer_id = self.root.after(
+                8000, self._auto_scan_tick)
+
     def _disconnect_ble(self, slot_index: int):
         """Disconnect BLE on a specific slot."""
         slot = self.slots[slot_index]
         sui = self.ui.slots[slot_index]
+
+        # Save device calibration before disconnecting
+        if slot.ble_address:
+            self._save_device_calibration(slot_index, slot.ble_address)
 
         self._reset_rumble(slot_index)
         slot.input_proc.stop()
@@ -623,12 +1099,21 @@ class GCControllerEnabler:
 
         slot.ble_connected = False
 
+        # Clean up any auto-scan state that targeted this slot
+        if self._auto_scan_slot == slot_index:
+            self._auto_scan_pending = False
+            self._auto_scan_slot = None
+        self._ble_pair_mode.pop(slot_index, None)
+
         if sui.pair_btn:
-            sui.pair_btn.configure(text="Pair Controller", state='normal')
+            sui.pair_btn.configure(text="Pair New Controller", state='normal')
         sui.connect_btn.configure(state='normal')
-        self.ui.update_status(slot_index, "Disconnected")
+        self.ui.update_status(slot_index, "Ready to Connect")
         self.ui.reset_slot_ui(slot_index)
         self.ui.update_tab_status(slot_index, connected=False, emulating=False)
+
+        # Reschedule auto-scan so it can reconnect this controller
+        self._ensure_auto_scan(delay_ms=3000)
 
     def _on_ble_disconnect(self, slot_index: int):
         """Handle unexpected BLE disconnect."""
@@ -642,6 +1127,13 @@ class GCControllerEnabler:
             slot.emu_mgr.stop()
 
         slot.ble_connected = False
+
+        # Clean up any auto-scan state that targeted this slot
+        if self._auto_scan_slot == slot_index:
+            self._auto_scan_pending = False
+            self._auto_scan_slot = None
+        self._ble_pair_mode.pop(slot_index, None)
+
         sui = self.ui.slots[slot_index]
 
         self.ui.update_status(slot_index, "BLE disconnected — reconnecting...")
@@ -652,20 +1144,26 @@ class GCControllerEnabler:
 
         self._attempt_ble_reconnect(slot_index)
 
+        # Ensure auto-scan is running (for reconnecting other known controllers)
+        self._ensure_auto_scan()
+
     def _attempt_ble_reconnect(self, slot_index: int):
         """Try to reconnect BLE. Retries every 3 seconds."""
         slot = self.slots[slot_index]
 
         # User clicked disconnect while we were waiting — abort
         if slot.input_proc.stop_event.is_set():
-            self.ui.update_status(slot_index, "Disconnected")
+            self.ui.update_status(slot_index, "Ready to Connect")
             self.ui.update_ble_status(slot_index, "")
             self.ui.reset_slot_ui(slot_index)
             if self.ui.slots[slot_index].pair_btn:
                 self.ui.slots[slot_index].pair_btn.configure(
-                    text="Pair Controller", state='normal')
+                    text="Pair New Controller", state='normal')
             self.ui.slots[slot_index].connect_btn.configure(state='normal')
             self.ui.update_tab_status(slot_index, connected=False, emulating=False)
+
+            # Reconnect loop aborted — let auto-scan take over
+            self._ensure_auto_scan(delay_ms=3000)
             return
 
         if not self._ble_initialized or not self._ble_subprocess:
@@ -812,7 +1310,7 @@ class GCControllerEnabler:
 
         # User clicked Disconnect while we were waiting — abort.
         if slot.input_proc.stop_event.is_set():
-            self.ui.update_status(slot_index, "Disconnected")
+            self.ui.update_status(slot_index, "Ready to Connect")
             self.ui.reset_slot_ui(slot_index)
             self.ui.update_tab_status(slot_index, connected=False, emulating=False)
             return
@@ -1058,41 +1556,62 @@ class GCControllerEnabler:
             self._messagebox.showerror("Emulation Error",
                                        f"Failed to start pipe emulation: {error}")
 
-    # ── Stick calibration ────────────────────────────────────────────
+    # ── Calibration wizard ──────────────────────────────────────────
 
-    def toggle_stick_calibration(self, slot_index: int):
-        """Toggle stick calibration on/off for a specific slot."""
+    def _needs_calibration(self, slot_index: int) -> bool:
+        """Check if a slot has default (uncalibrated) stick calibration."""
+        return self.slot_calibrations[slot_index].get('stick_left_octagon') is None
+
+    def _start_auto_calibration(self, slot_index: int):
+        """Start the calibration wizard automatically for a newly connected controller."""
+        if not self.slots[slot_index].is_connected:
+            return
+        # Wait until the controller is actually producing HID data before starting
+        if self._latest_ui_data[slot_index] is None:
+            self.root.after(500, lambda si=slot_index: self._start_auto_calibration(si))
+            return
+        self.ui.update_status(slot_index, "New controller — starting calibration...")
+        self.calibration_wizard_step(slot_index)
+
+    def calibration_wizard_step(self, slot_index: int):
+        """Unified calibration wizard: sticks first, then triggers, one button."""
         slot = self.slots[slot_index]
         sui = self.ui.slots[slot_index]
 
         if slot.cal_mgr.stick_calibrating:
+            # Finish stick calibration, chain into trigger calibration
             slot.cal_mgr.finish_stick_calibration()
             self.ui.set_calibration_mode(slot_index, False)
-            sui.stick_cal_btn.configure(text="Calibrate Sticks")
-            sui.stick_cal_status.configure(text="Calibration complete!")
-            self.ui.mark_slot_dirty(slot_index)
+            self.ui.redraw_octagons(slot_index)
+            self._auto_save()
+
+            # Start trigger calibration (step 0 → 1)
+            result = slot.cal_mgr.trigger_cal_next_step()
+            if result:
+                _step, _btn, status_text = result
+                sui.cal_wizard_btn.configure(text="Continue")
+                self.ui.update_status(slot_index, status_text)
+
+        elif slot.cal_mgr.trigger_cal_step > 0:
+            # Advance trigger calibration wizard
+            result = slot.cal_mgr.trigger_cal_next_step()
+            if result:
+                step, _btn, status_text = result
+                self.ui.update_status(slot_index, status_text)
+                if step == 0:
+                    # Wizard complete
+                    sui.cal_wizard_btn.configure(text="Calibration Wizard")
+                    self.ui.draw_trigger_markers(slot_index)
+                    self._auto_save()
+                else:
+                    sui.cal_wizard_btn.configure(text="Continue")
+
         else:
+            # Start stick calibration (phase 1)
             self.ui.set_calibration_mode(slot_index, True)
             slot.cal_mgr.start_stick_calibration()
-            sui.stick_cal_btn.configure(text="Finish Calibration")
-            sui.stick_cal_status.configure(text="Move sticks to all extremes...")
-
-    # ── Trigger calibration ──────────────────────────────────────────
-
-    def trigger_cal_step(self, slot_index: int):
-        """Advance the trigger calibration wizard one step for a specific slot."""
-        slot = self.slots[slot_index]
-        sui = self.ui.slots[slot_index]
-
-        result = slot.cal_mgr.trigger_cal_next_step()
-        if result is not None:
-            step, btn_text, status_text = result
-            sui.trigger_cal_btn.configure(text=btn_text)
-            self.ui.update_status(slot_index, status_text)
-            if step == 0:
-                # Wizard finished — redraw markers
-                self.ui.draw_trigger_markers(slot_index)
-                self.ui.mark_slot_dirty(slot_index)
+            sui.cal_wizard_btn.configure(text="Continue")
+            self.ui.update_status(slot_index, "Move sticks to all extremes, then click Continue")
 
     # ── Settings ─────────────────────────────────────────────────────
 
@@ -1100,6 +1619,7 @@ class GCControllerEnabler:
         """Update calibration values from UI variables for all slots."""
         # Global settings stored in slot 0's calibration
         self.slot_calibrations[0]['auto_connect'] = self.ui.auto_connect_var.get()
+        self.slot_calibrations[0]['auto_scan_ble'] = self.ui.auto_scan_ble_var.get()
         self.slot_calibrations[0]['emulation_mode'] = self.ui.emu_mode_var.get()
         self.slot_calibrations[0]['trigger_bump_100_percent'] = self.ui.trigger_mode_var.get()
         self.slot_calibrations[0]['minimize_to_tray'] = self.ui.minimize_to_tray_var.get()
@@ -1110,18 +1630,24 @@ class GCControllerEnabler:
             cal['emulation_mode'] = self.ui.emu_mode_var.get()
             self.slots[i].cal_mgr.refresh_cache()
 
-            # Save BLE state
+            # Save per-device calibration back to the BLE device registry
             slot = self.slots[i]
-            cal['connection_mode'] = slot.connection_mode
-            if slot.ble_address:
-                cal['preferred_ble_address'] = slot.ble_address
+            if slot.ble_connected and slot.ble_address:
+                self._save_device_calibration(i, slot.ble_address)
+
+    def _auto_save(self):
+        """Silently save settings (no messagebox). Called after calibration/pairing."""
+        self.update_calibration_from_ui()
+        try:
+            self.settings_mgr.save()
+        except Exception as e:
+            print(f"Auto-save failed: {e}")
 
     def save_settings(self):
         """Save calibration settings for all slots to file."""
         self.update_calibration_from_ui()
         try:
             self.settings_mgr.save()
-            self.ui.mark_all_clean()
             self._messagebox.showinfo("Settings", "Settings saved successfully!")
         except Exception as e:
             self._messagebox.showerror("Error", f"Failed to save settings: {e}")
@@ -1274,6 +1800,9 @@ class GCControllerEnabler:
 
     def _actual_quit(self):
         """Perform full application shutdown and destroy the window."""
+        # Stop auto-scan loop
+        self._stop_auto_scan()
+
         # Stop tray icon
         if self._tray_icon:
             try:
@@ -1746,20 +2275,16 @@ def run_headless(mode_override: str = None):
         slot_idx = open_slots[0]
         ble_scanning_slot = slot_idx
 
-        # Use saved BLE address if available (direct reconnect)
-        saved_addr = slot_calibrations[slot_idx].get('preferred_ble_address', '') or None
-
         # Exclude controllers already on other slots so the scan
         # doesn't grab them if they briefly disconnect and re-advertise
         exclude = _get_connected_ble_addresses()
 
-        print(f"[slot {slot_idx + 1}] BLE scanning"
-              f"{' for ' + saved_addr if saved_addr else ''}...")
+        print(f"[slot {slot_idx + 1}] BLE scanning...")
 
         ble_mgr.send_cmd({
             "cmd": "scan_connect",
             "slot_index": slot_idx,
-            "target_address": saved_addr,
+            "target_address": None,
             "exclude_addresses": exclude if exclude else None,
         })
 
@@ -1783,9 +2308,10 @@ def run_headless(mode_override: str = None):
 
             print(f"[slot {si + 1}] BLE {'reconnected' if was_reconnect else 'connected'}: {mac}")
 
-            # Save address
-            slot_calibrations[si]['preferred_ble_address'] = mac
-            slot_calibrations[si]['connection_mode'] = 'ble'
+            # Register device in known_ble_devices
+            devices = slot_calibrations[0].setdefault('known_ble_devices', {})
+            if mac.upper() not in devices:
+                devices[mac.upper()] = {}
 
             # Create per-slot data queue, input processor, and emulation
             cal = slot_calibrations[si]
