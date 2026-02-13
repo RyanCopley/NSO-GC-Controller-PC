@@ -13,7 +13,7 @@ from bumble.device import Device, Peer, ConnectionParametersPreferences
 from bumble.hci import Address, HCI_LE_1M_PHY
 from bumble.transport import open_transport
 
-from .sw2_protocol import sw2_init, translate_ble_to_usb
+from .sw2_protocol import sw2_init, translate_ble_native_to_usb
 
 # Known Nintendo BLE MAC OUI prefixes (first 3 octets)
 _NINTENDO_OUIS = (
@@ -155,10 +155,10 @@ class BumbleBackend:
             self._connections.pop(mac, None)
             return None
 
-        # Input notification callback: translate BLE format to USB-compatible 64 bytes
+        # Input notification callback: translate native NSO BLE format to USB-compatible 64 bytes
         def _on_input(value: bytes):
             try:
-                data_queue.put_nowait(translate_ble_to_usb(value))
+                data_queue.put_nowait(translate_ble_native_to_usb(value))
             except queue.Full:
                 pass
 

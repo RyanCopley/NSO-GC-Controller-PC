@@ -228,13 +228,19 @@ except ImportError:
     _AES_AVAILABLE = False
 
 # --- Fixed ATT Handles ---
-H_OUT_CMD = 0x0016      # Command + rumble prefix output handle
+H_OUT_CMD = 0x0016         # Command + rumble prefix output handle
 H_SVC1_ENABLE = 0x0005
-H_INPUT_REPORT = 0x000A
-H_INPUT_CCCD = 0x000B
-H_CMD_WRITE = 0x0014
-H_CMD_RESPONSE = 0x001A
-H_CMD_RESP_CCCD = 0x001B
+H_INPUT_REPORT = 0x000A    # Legacy input report (format 0)
+H_INPUT_CCCD = 0x000B      # CCCD for 0x000A
+H_GC_INPUT = 0x000E        # GC-specific input report (format 3, Read/Notify)
+H_GC_INPUT_CCCD = 0x000F   # CCCD for 0x000E
+H_REPORT_RATE = 0x0010     # Report rate descriptor
+H_CMD_WRITE = 0x0014       # Legacy command channel (old)
+H_CMD_WRITE_2 = 0x0016     # Command channel per ndeadly guide
+H_CMD_RESPONSE = 0x001A    # Legacy command response (old)
+H_CMD_RESP_CCCD = 0x001B   # CCCD for 0x001A
+H_CMD_RESPONSE_2 = 0x001E  # Command response for 0x0016 writes
+H_CMD_RESP_CCCD_2 = 0x001F # CCCD for 0x001E
 
 # --- Command IDs ---
 CMD_SPI_READ = 0x02
@@ -246,8 +252,15 @@ REQ_TYPE = 0x91
 IFACE_BLE = 0x01
 
 # --- SPI addresses ---
-SPI_DEVICE_INFO = (0x00, 0x30, 0x01, 0x00)   # 0x00013000
-SPI_PAIRING_DATA = (0x00, 0xA0, 0x1F, 0x00)  # 0x001FA000
+SPI_DEVICE_INFO = (0x00, 0x30, 0x01, 0x00)     # 0x00013000
+SPI_PAIRING_DATA = (0x00, 0xA0, 0x1F, 0x00)    # 0x001FA000
+SPI_LEFT_STICK_CAL = (0x80, 0x30, 0x01, 0x00)  # 0x00013080, 0x40 bytes
+SPI_RIGHT_STICK_CAL = (0xC0, 0x30, 0x01, 0x00) # 0x000130C0, 0x40 bytes
+SPI_UNKNOWN_1FC040 = (0x40, 0xC0, 0x1F, 0x00)  # 0x001FC040, 0x40 bytes
+SPI_UNKNOWN_13040 = (0x40, 0x30, 0x01, 0x00)   # 0x00013040, 0x10 bytes
+SPI_UNKNOWN_13100 = (0x00, 0x31, 0x01, 0x00)   # 0x00013100, 0x18 bytes
+SPI_GC_CAL_2 = (0x60, 0x31, 0x01, 0x00)        # 0x00013160, 0x20 bytes (GC-specific)
+SPI_TRIGGER_CAL = (0x40, 0x31, 0x01, 0x00)     # 0x00013140, 0x02 bytes (GC-specific)
 
 # --- LED map (player indicators) ---
 LED_MAP = [0x01, 0x03, 0x05, 0x06, 0x07, 0x09, 0x0A, 0x0B]
@@ -290,6 +303,34 @@ def build_led_cmd(led_mask: int) -> bytes:
         0x00, 0x08, 0x00, 0x00,
         led_mask, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ])
+
+
+def build_vibration_sample(index: int = 0x03) -> bytes:
+    """Build vibration sample command (0x0A, subcmd 0x02)."""
+    return bytes([
+        0x0A, REQ_TYPE, IFACE_BLE, 0x02,
+        0x00, 0x04, 0x00, 0x00,
+        index, 0x00, 0x00, 0x00,
+    ])
+
+
+def build_feature_flags(subcmd: int, flags: int) -> bytes:
+    """Build feature flags command (0x0C).
+
+    Args:
+        subcmd: 0x02 to configure, 0x04 to enable
+        flags: Feature flag bitmask (ndeadly uses 0xFF for configure, 0x03 for enable)
+    """
+    return bytes([
+        0x0C, REQ_TYPE, IFACE_BLE, subcmd,
+        0x00, 0x04, 0x00, 0x00,
+        flags, 0x00, 0x00, 0x00,
+    ])
+
+
+def build_version_info() -> bytes:
+    """Build firmware version info command (0x10)."""
+    return bytes([0x10, REQ_TYPE, IFACE_BLE, 0x01, 0x00, 0x00, 0x00, 0x00])
 
 
 def build_pair_step1(local_addr_bytes: bytes) -> bytes:
@@ -350,11 +391,11 @@ def _extract_pair_key(resp: Optional[bytes]) -> Optional[bytes]:
 
 
 def _verify_pair_challenge(ltk: bytes, a2: bytes, b2: bytes) -> bool:
-    """Verify B2 == AES-128-ECB(LTK, reverse(A2))."""
+    """Verify B2 == AES-128-ECB(reverse(LTK), reverse(A2))."""
     if not _AES_AVAILABLE:
         return True
     try:
-        cipher = Cipher(algorithms.AES(ltk), modes.ECB())
+        cipher = Cipher(algorithms.AES(bytes(reversed(ltk))), modes.ECB())
         encryptor = cipher.encryptor()
         expected = encryptor.update(bytes(reversed(a2))) + encryptor.finalize()
         return expected == b2
@@ -366,7 +407,7 @@ async def sw2_init(peer: Peer, connection, device: Device, slot_index: int,
                    on_input: Callable[[bytes], None],
                    on_status: Callable[[str], None],
                    disconnected: Optional[asyncio.Event] = None) -> bool:
-    """Run the full SW2 BLE initialization sequence.
+    """Run the full SW2 BLE initialization sequence per ndeadly guide.
 
     Args:
         peer: Bumble Peer wrapping the connection
@@ -391,38 +432,46 @@ async def sw2_init(peer: Peer, connection, device: Device, slot_index: int,
         except asyncio.TimeoutError:
             return None
 
-    # Step 1: Enable proprietary service
+    def _check_disconnected() -> bool:
+        return disconnected is not None and disconnected.is_set()
+
+    # Use 0x0014/0x001A command channel (ndeadly's default).
+    # 0x0016/0x001E also works but requires a 33-byte zero prefix on commands
+    # and responses have a 14-byte header — 0x0014/0x001A is simpler.
+    CMD_H = H_CMD_WRITE
+    RESP_H = H_CMD_RESPONSE
+    RESP_CCCD_H = H_CMD_RESP_CCCD
+
+    # --- Step 1: Enable proprietary service ---
     on_status("Enabling service...")
     if not await _write_handle(peer, H_SVC1_ENABLE, bytes([0x01, 0x00]),
                                with_response=True):
         return False
     await asyncio.sleep(0.2)
 
-    # Step 2: Enable command response notifications
+    # --- Step 2: Enable command response notifications on 0x001A ---
     on_status("Setting up command channel...")
-    await _write_handle(peer, H_CMD_RESP_CCCD, bytes([0x01, 0x00]),
+    await _write_handle(peer, RESP_CCCD_H, bytes([0x01, 0x00]),
                         with_response=True)
 
     # Subscribe to command response characteristic
     for service in peer.services:
         for char in service.characteristics:
-            if char.handle == H_CMD_RESPONSE:
+            if char.handle == RESP_H:
                 try:
                     await char.subscribe(subscriber=_on_cmd_response)
                 except Exception:
                     pass
     await asyncio.sleep(0.2)
 
-    # Step 3: Read device info (SPI 0x00013000)
+    # --- Step 3: Read device info (SPI 0x00013000) ---
     on_status("Reading device info...")
-    cmd = build_spi_read(SPI_DEVICE_INFO, 0x40)
-    await _write_handle(peer, H_CMD_WRITE, cmd)
+    await _write_handle(peer, CMD_H, build_spi_read(SPI_DEVICE_INFO, 0x40))
     await _wait_cmd_response(timeout=3.0)
-
-    if disconnected and disconnected.is_set():
+    if _check_disconnected():
         return False
 
-    # Step 4: Proprietary pairing handshake (cmd 0x15)
+    # --- Steps 4-7: Proprietary pairing handshake (cmd 0x15) ---
     on_status("Pairing (proprietary)...")
     local_addr = device.public_address
     if local_addr:
@@ -430,46 +479,44 @@ async def sw2_init(peer: Peer, connection, device: Device, slot_index: int,
     else:
         addr_bytes = bytes([0xF5, 0xF4, 0xF3, 0xF2, 0xF1, 0xF0])
 
-    # 4a: Send local address
-    pair1 = build_pair_step1(addr_bytes)
-    await _write_handle(peer, H_CMD_WRITE, pair1)
+    # 4: Send local address
+    await _write_handle(peer, CMD_H, build_pair_step1(addr_bytes))
     await _wait_cmd_response(timeout=3.0)
-    if disconnected and disconnected.is_set():
+    if _check_disconnected():
         return False
 
-    # 4b: Generate and send public key A1 (subcommand 0x04)
+    # 5: Generate and send public key A1 (subcommand 0x04)
     a1_key = os.urandom(16)
-    await _write_handle(peer, H_CMD_WRITE, build_pair_step2(a1_key))
+    await _write_handle(peer, CMD_H, build_pair_step2(a1_key))
     await _wait_cmd_response(timeout=3.0)
-    if disconnected and disconnected.is_set():
+    if _check_disconnected():
         return False
 
     # Compute LTK = A1 XOR B1 (B1 is the controller's fixed public key)
     computed_ltk = _xor_bytes(a1_key, CONTROLLER_PUBLIC_KEY_B1)
 
-    # 4c: Generate and send challenge A2 (subcommand 0x02)
+    # 6: Generate and send challenge A2 (subcommand 0x02)
     a2_challenge = os.urandom(16)
-    await _write_handle(peer, H_CMD_WRITE, build_pair_step3(a2_challenge))
+    await _write_handle(peer, CMD_H, build_pair_step3(a2_challenge))
     resp = await _wait_cmd_response(timeout=3.0)
-    if disconnected and disconnected.is_set():
+    if _check_disconnected():
         return False
 
-    # Verify controller's response B2 = AES-128-ECB(LTK, reverse(A2))
+    # Verify controller's response B2 = AES-128-ECB(reverse(LTK), reverse(A2))
     b2 = _extract_pair_key(resp)
     if b2:
         if not _verify_pair_challenge(computed_ltk, a2_challenge, b2):
             print("  BLE pairing: challenge verification failed")
 
-    # 4d: Finalize pairing
-    await _write_handle(peer, H_CMD_WRITE, PAIR_STEP4)
+    # 7: Finalize pairing
+    await _write_handle(peer, CMD_H, PAIR_STEP4)
     await _wait_cmd_response(timeout=3.0)
-    if disconnected and disconnected.is_set():
+    if _check_disconnected():
         return False
 
-    # Step 5: Read pairing data from SPI as fallback LTK source
+    # --- Step 8: Read pairing data from SPI as fallback LTK source ---
     on_status("Reading pairing data...")
-    cmd = build_spi_read(SPI_PAIRING_DATA, 0x40)
-    await _write_handle(peer, H_CMD_WRITE, cmd)
+    await _write_handle(peer, CMD_H, build_spi_read(SPI_PAIRING_DATA, 0x40))
     resp = await _wait_cmd_response(timeout=3.0)
 
     spi_ltk = None
@@ -485,10 +532,10 @@ async def sw2_init(peer: Peer, connection, device: Device, slot_index: int,
     elif resp and len(resp) >= 16:
         spi_ltk = bytes(resp[-16:])
 
-    if disconnected and disconnected.is_set():
+    if _check_disconnected():
         return False
 
-    # Step 6: LE encryption — try computed LTK first, fall back to SPI
+    # --- Step 9: LE encryption — try computed LTK first, fall back to SPI ---
     if not connection.is_encrypted:
         on_status("Encrypting link...")
         attempts = [
@@ -501,7 +548,7 @@ async def sw2_init(peer: Peer, connection, device: Device, slot_index: int,
             attempts.append((0, bytes(8), bytes(reversed(spi_ltk))))
 
         for ediv, rand, ltk in attempts:
-            if connection.is_encrypted or disconnected and disconnected.is_set():
+            if connection.is_encrypted or _check_disconnected():
                 break
             encryption_done = asyncio.Event()
 
@@ -534,33 +581,83 @@ async def sw2_init(peer: Peer, connection, device: Device, slot_index: int,
                 break
             await asyncio.sleep(0.3)
 
-    if disconnected and disconnected.is_set():
+    if _check_disconnected():
         return False
 
-    # Step 7: Set player LED
+    # --- Step 10: Vibration sample ---
+    on_status("Configuring vibration...")
+    await _write_handle(peer, CMD_H, build_vibration_sample(0x03))
+    await _wait_cmd_response(timeout=2.0)
+
+    # --- Step 11: Set player LED ---
     on_status("Setting LED...")
     led_idx = min(slot_index, len(LED_MAP) - 1)
-    cmd = build_led_cmd(LED_MAP[led_idx])
-    await _write_handle(peer, H_CMD_WRITE, cmd)
+    await _write_handle(peer, CMD_H, build_led_cmd(LED_MAP[led_idx]))
     await _wait_cmd_response(timeout=2.0)
-    await asyncio.sleep(0.2)
 
-    if disconnected and disconnected.is_set():
+    # --- Step 12: Configure features 0xFF (subcmd 0x02) ---
+    on_status("Configuring features...")
+    await _write_handle(peer, CMD_H, build_feature_flags(0x02, 0xFF))
+    await _wait_cmd_response(timeout=2.0)
+
+    if _check_disconnected():
         return False
 
-    # Step 8: Enable input notifications + disable cmd response
+    # --- Steps 13-17: SPI calibration reads ---
+    on_status("Reading calibration data...")
+    for spi_addr, size in [
+        (SPI_LEFT_STICK_CAL, 0x40),
+        (SPI_RIGHT_STICK_CAL, 0x40),
+        (SPI_UNKNOWN_1FC040, 0x40),
+        (SPI_UNKNOWN_13040, 0x10),
+        (SPI_UNKNOWN_13100, 0x18),
+    ]:
+        await _write_handle(peer, CMD_H, build_spi_read(spi_addr, size))
+        await _wait_cmd_response(timeout=3.0)
+        if _check_disconnected():
+            return False
+
+    # --- Step 18: SPI read trigger cal 0x13140 (GC-specific) ---
+    await _write_handle(peer, CMD_H, build_spi_read(SPI_TRIGGER_CAL, 0x02))
+    await _wait_cmd_response(timeout=3.0)
+
+    # --- Step 19: SPI read GC cal 0x13160 (GC-specific) ---
+    await _write_handle(peer, CMD_H, build_spi_read(SPI_GC_CAL_2, 0x20))
+    await _wait_cmd_response(timeout=3.0)
+
+    if _check_disconnected():
+        return False
+
+    # --- Step 20: Enable features 0x03 (subcmd 0x04) ---
+    await _write_handle(peer, CMD_H, build_feature_flags(0x04, 0x03))
+    await _wait_cmd_response(timeout=2.0)
+
+    # --- Step 21: Get firmware version info ---
+    await _write_handle(peer, CMD_H, build_version_info())
+    await _wait_cmd_response(timeout=2.0)
+
+    if _check_disconnected():
+        return False
+
+    # --- Step 22: Set report rate ---
+    on_status("Setting report rate...")
+    await _write_handle(peer, H_REPORT_RATE, bytes([0x85, 0x00]),
+                        with_response=True)
+    await asyncio.sleep(0.1)
+
+    # --- Step 23: Enable GC input CCCD, disable cmd response CCCD ---
     on_status("Enabling input...")
     for service in peer.services:
         for char in service.characteristics:
-            if char.handle == H_INPUT_REPORT:
+            if char.handle == H_GC_INPUT:
                 try:
                     await char.subscribe(subscriber=on_input)
                 except Exception:
                     pass
 
-    await _write_handle(peer, H_INPUT_CCCD, bytes([0x01, 0x00]),
+    await _write_handle(peer, H_GC_INPUT_CCCD, bytes([0x01, 0x00]),
                         with_response=True)
-    await _write_handle(peer, H_CMD_RESP_CCCD, bytes([0x00, 0x00]),
+    await _write_handle(peer, RESP_CCCD_H, bytes([0x00, 0x00]),
                         with_response=True)
 
     on_status("Connected via BLE")
